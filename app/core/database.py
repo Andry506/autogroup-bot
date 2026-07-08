@@ -1,13 +1,13 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from app.core.config import config
 
-# Создаем подключение к базе данных
-# Для SQLite нужно добавить check_same_thread=False
+DATABASE_URL = "sqlite:////data/bot.db"
+
+# Создаем подключение к базе данных (встроенный драйвер sqlite3 / pysqlite)
 engine = create_engine(
-    config.DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in config.DATABASE_URL else {}
+    DATABASE_URL,
+    connect_args={"check_same_thread": False},
 )
 
 # Фабрика сессий (для выполнения запросов)
