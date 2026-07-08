@@ -1,4 +1,5 @@
 import os
+import base64
 from dotenv import load_dotenv
 import logging
 
@@ -16,13 +17,13 @@ class Config:
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
     
-    # === БАЗА ДАННЫХ ===
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ai_auto.db")
-    
     # === GOOGLE SHEETS ===
     GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
     GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-    GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+    _credentials_json_raw = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+    GOOGLE_CREDENTIALS_JSON = ""
+    if _credentials_json_raw:
+        GOOGLE_CREDENTIALS_JSON = base64.b64decode(_credentials_json_raw).decode("utf-8")
 
     # === НАСТРОЙКИ ===
     DEBUG = os.getenv("DEBUG", "True").lower() == "true"
