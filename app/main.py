@@ -212,6 +212,11 @@ def apply_parsed_fields(lead: Lead, parsed: dict[str, str]) -> None:
             clean_value = clean_text(value)
             setattr(lead, field, clean_value)
 
+
+async def send_reply(message: types.Message, text: str, **kwargs) -> None:
+    """Отправляет ответ через bot.send_message (надёжно работает в webhook-режиме)."""
+    await bot.send_message(chat_id=message.chat.id, text=text, **kwargs)
+
 # === ЗАВЕРШЕНИЕ ЗАЯВКИ ===
 async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) -> None:
     if lead.status == "completed":
@@ -224,13 +229,15 @@ async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) ->
     db.commit()
 
     # Убираем клавиатуру
-    await message.answer(
+    await send_reply(
+        message,
         "✅ Диалог завершен",
-        reply_markup=remove_keyboard()
+        reply_markup=remove_keyboard(),
     )
 
     # Отправляем клиенту
-    await message.answer(
+    await send_reply(
+        message,
         format_client_summary(lead),
         parse_mode=ParseMode.HTML,
     )
@@ -278,7 +285,7 @@ async def clean_my_leads(message: types.Message):
     # === ЗАЩИТА: ТОЛЬКО ДЛЯ ТВОЕГО ID ===
     YOUR_CHAT_ID = "971853859"
     if chat_id != YOUR_CHAT_ID:
-        await message.answer("⛔ У вас нет прав на эту команду.")
+        await send_reply(message, "⛔ У вас нет прав на эту команду.")
         return
     # =====================================
     
@@ -288,15 +295,15 @@ async def clean_my_leads(message: types.Message):
         db.commit()
         
         if deleted > 0:
-            await message.answer(f"✅ Удалено {deleted} тестовых заявок. Можно начинать новый диалог!")
+            await send_reply(message, f"✅ Удалено {deleted} тестовых заявок. Можно начинать новый диалог!")
         else:
-            await message.answer("ℹ️ У вас нет активных заявок для удаления.")
+            await send_reply(message, "ℹ️ У вас нет активных заявок для удаления.")
             
         logger.info(f"🧹 Очистка: удалено {deleted} заявок для chat_id={chat_id}")
         
     except Exception as e:
         logger.error(f"❌ Ошибка очистки: {e}")
-        await message.answer("⚠️ Ошибка при очистке. Попробуйте позже.")
+        await send_reply(message, "⚠️ Ошибка при очистке. Попробуйте позже.")
         db.rollback()
     finally:
         db.close()
@@ -309,19 +316,21 @@ async def handle_message(message: types.Message):
 
     # === РЕЙТ-ЛИМИТ ===
     if not rate_limiter.is_allowed(chat_id):
-        await message.answer(
-            "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова."
+        await send_reply(
+            message,
+            "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
         )
         return
 
     # === ОБРАБОТКА КНОПКИ "ВВЕСТИ ВРУЧНУЮ" ===
     if message.text and message.text == "Ввести вручную":
-        await message.answer(
+        await send_reply(
+            message,
             "✍️ Введите номер телефона в формате:\n"
             "• +375 29 123 45 67\n"
             "• 8 (029) 123-45-67\n"
             "• или @username",
-            reply_markup=remove_keyboard()
+            reply_markup=remove_keyboard(),
         )
         return
 
@@ -338,7 +347,7 @@ async def handle_message(message: types.Message):
                 logger.info(f"📱 Получен номер телефона: {clean_phone}")
                 text = clean_phone
             else:
-                await message.answer("⚠️ Произошла ошибка. Попробуйте еще раз.")
+                await send_reply(message, "⚠️ Произошла ошибка. Попробуйте еще раз.")
                 db.close()
                 return
         except Exception as e:
@@ -349,17 +358,18 @@ async def handle_message(message: types.Message):
             db.close()
     else:
         if not message.text:
-            await message.answer("Пожалуйста, отправьте текстовое сообщение.")
+            await send_reply(message, "Пожалуйста, отправьте текстовое сообщение.")
             return
 
         text = message.text.strip()
         if not text:
-            await message.answer("Пожалуйста, отправьте текстовое сообщение.")
+            await send_reply(message, "Пожалуйста, отправьте текстовое сообщение.")
             return
 
         if len(text) > config.MAX_MESSAGE_LENGTH:
-            await message.answer(
-                f"⚠️ Сообщение слишком длинное. Максимум {config.MAX_MESSAGE_LENGTH} символов."
+            await send_reply(
+                message,
+                f"⚠️ Сообщение слишком длинное. Максимум {config.MAX_MESSAGE_LENGTH} символов.",
             )
             return
 
@@ -386,7 +396,7 @@ async def handle_message(message: types.Message):
                 "Я помогу собрать заявку на автомобиль.\n"
                 "Отвечайте на вопросы, и я передам данные менеджеру."
             )
-            await message.answer(welcome_text)
+            await send_reply(message, welcome_text)
             # =========================================
             
         elif username != "unknown" and lead.username != username:
@@ -394,8 +404,9 @@ async def handle_message(message: types.Message):
 
         # 2. ЗАЩИТА ОТ ДУБЛЕЙ
         if lead.status == "completed":
-            await message.answer(
-                "✅ Ваша заявка уже принята. Менеджер свяжется с вами в ближайшее время."
+            await send_reply(
+                message,
+                "✅ Ваша заявка уже принята. Менеджер свяжется с вами в ближайшее время.",
             )
             return
 
@@ -411,15 +422,17 @@ async def handle_message(message: types.Message):
             if not is_valid:
                 keyboard = get_keyboard_for_field(field_name)
                 if keyboard:
-                    await message.answer(
+                    await send_reply(
+                        message,
                         "🤔 Не совсем понял. Пожалуйста, уточните, выбрав вариант:",
-                        reply_markup=keyboard
+                        reply_markup=keyboard,
                     )
                     logger.info(f"❓ Показаны варианты для поля {field_name}, chat_id={chat_id}")
                     return
                 else:
-                    await message.answer(
-                        f"🤔 Не совсем понял. Пожалуйста, уточните ответ для поля '{field_name}'."
+                    await send_reply(
+                        message,
+                        f"🤔 Не совсем понял. Пожалуйста, уточните ответ для поля '{field_name}'.",
                     )
                     return
 
@@ -444,6 +457,8 @@ async def handle_message(message: types.Message):
             parsed = await llm.parse_message(text)
             apply_parsed_fields(lead, parsed)
             logger.info("🧠 LLM-парсинг выполнен для lead_id=%s", lead.id)
+            lead_data = get_lead_data(lead)
+            logger.info("📋 Данные после LLM: %s", lead_data)
         elif expected_field:
             cleaned_value = clean_text(text)
             setattr(lead, expected_field.value, cleaned_value)
@@ -471,7 +486,8 @@ async def handle_message(message: types.Message):
 
         if next_field:
             question = FSMService.get_question_for_field(next_field)
-            await message.answer(question)
+            await send_reply(message, question)
+            logger.info("📤 Ответ отправлен в chat_id=%s", chat_id)
 
             reminder_service.schedule_reminder(
                 chat_id=chat_id,
@@ -497,7 +513,7 @@ async def handle_message(message: types.Message):
 
     except Exception as e:
         logger.error("❌ Ошибка обработки сообщения: %s", e, exc_info=True)
-        await message.answer("⚠️ Произошла ошибка. Пожалуйста, попробуйте ещё раз.")
+        await send_reply(message, "⚠️ Произошла ошибка. Пожалуйста, попробуйте ещё раз.")
         db.rollback()
     finally:
         db.close()
@@ -522,17 +538,23 @@ async def on_startup():
     await bot.set_webhook(url=config.WEBHOOK_URL, drop_pending_updates=True)
     logger.info("🔗 Webhook установлен: %s", config.WEBHOOK_URL)
 
+@app.on_event("shutdown")
+async def on_shutdown():
+    reminder_service.stop()
+    await bot.session.close()
+    logger.info("🛑 HTTP-сессии закрыты")
+
 # === WEBHOOK ДЛЯ TELEGRAM ===
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     """Точка входа для Telegram (Webhook)"""
     try:
         update_data = await request.json()
-        update = types.Update(**update_data)
+        update = types.Update.model_validate(update_data, context={"bot": bot})
         await dp.feed_update(bot, update)
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"❌ Ошибка Webhook: {e}")
+        logger.error("❌ Ошибка Webhook: %s", e, exc_info=True)
         return {"status": "error", "message": str(e)}
 
 # === ЗАПУСК ===

@@ -1,10 +1,34 @@
 import os
+import base64
 from dotenv import load_dotenv
 import logging
 
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+
+def _decode_credentials_json(raw: str) -> str:
+    """Декодирует GOOGLE_CREDENTIALS_JSON из base64 в JSON-строку."""
+    if not raw:
+        return ""
+    raw = raw.strip()
+    try:
+        decoded_bytes = base64.b64decode(raw, validate=True)
+    except Exception as e:
+        logger.error("GOOGLE_CREDENTIALS_JSON: ошибка base64-декодирования: %s", e)
+        return ""
+    for encoding in ("utf-8", "cp1251"):
+        try:
+            return decoded_bytes.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    logger.error(
+        "GOOGLE_CREDENTIALS_JSON: данные после base64 не являются UTF-8 или CP1251. "
+        "Перекодируйте credentials.json в UTF-8 перед base64."
+    )
+    return ""
+
 
 class Config:
     # === TELEGRAM ===
@@ -16,13 +40,11 @@ class Config:
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
     OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
     
-    # === БАЗА ДАННЫХ ===
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./ai_auto.db")
-    
     # === GOOGLE SHEETS ===
     GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
     GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-    GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+    _credentials_json_raw = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+    GOOGLE_CREDENTIALS_JSON = _decode_credentials_json(_credentials_json_raw)
 
     # === НАСТРОЙКИ ===
     DEBUG = os.getenv("DEBUG", "True").lower() == "true"

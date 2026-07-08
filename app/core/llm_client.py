@@ -23,10 +23,6 @@ class LLMClient:
         self.api_key = config.OPENROUTER_API_KEY
         self.model = config.OPENROUTER_MODEL
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
-        self._client = httpx.AsyncClient(timeout=15.0)
-
-    async def close(self) -> None:
-        await self._client.aclose()
 
     async def parse_message(self, text: str) -> dict:
         """
@@ -53,28 +49,29 @@ class LLMClient:
 {text}"""
 
         try:
-            response = await self._client.post(
-                self.base_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {"role": "system", "content": "Ты извлекаешь данные из текста. Отвечай только JSON."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 200,
-                    "response_format": {"type": "json_object"}
-                }
-            )
-            response.raise_for_status()
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    self.base_url,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": "Ты извлекаешь данные из текста. Отвечай только JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 200,
+                        "response_format": {"type": "json_object"}
+                    }
+                )
+                response.raise_for_status()
 
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            return self._parse_json_content(content)
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                return self._parse_json_content(content)
 
         except Exception as e:
             logger.error("Ошибка LLM: %s", e)
