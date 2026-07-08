@@ -44,6 +44,8 @@ class Config:
     GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
     GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
     _credentials_json_raw = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+
+
     GOOGLE_CREDENTIALS_JSON = _decode_credentials_json(_credentials_json_raw)
 
     # === НАСТРОЙКИ ===
