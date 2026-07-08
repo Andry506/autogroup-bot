@@ -215,7 +215,13 @@ def apply_parsed_fields(lead: Lead, parsed: dict[str, str]) -> None:
 
 async def send_reply(message: types.Message, text: str, **kwargs) -> None:
     """Отправляет ответ через bot.send_message (надёжно работает в webhook-режиме)."""
-    await bot.send_message(chat_id=message.chat.id, text=text, **kwargs)
+    chat_id = message.chat.id
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+        logger.info("📤 Ответ отправлен в chat_id=%s", chat_id)
+    except Exception as e:
+        logger.error("❌ Ошибка отправки: %s", e, exc_info=True)
+        raise
 
 # === ЗАВЕРШЕНИЕ ЗАЯВКИ ===
 async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) -> None:
@@ -487,7 +493,6 @@ async def handle_message(message: types.Message):
         if next_field:
             question = FSMService.get_question_for_field(next_field)
             await send_reply(message, question)
-            logger.info("📤 Ответ отправлен в chat_id=%s", chat_id)
 
             reminder_service.schedule_reminder(
                 chat_id=chat_id,
@@ -513,7 +518,10 @@ async def handle_message(message: types.Message):
 
     except Exception as e:
         logger.error("❌ Ошибка обработки сообщения: %s", e, exc_info=True)
-        await send_reply(message, "⚠️ Произошла ошибка. Пожалуйста, попробуйте ещё раз.")
+        try:
+            await send_reply(message, "⚠️ Произошла ошибка. Пожалуйста, попробуйте ещё раз.")
+        except Exception:
+            pass
         db.rollback()
     finally:
         db.close()
