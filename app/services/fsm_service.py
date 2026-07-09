@@ -23,7 +23,7 @@ class FSMService:
         LeadField.CAR: "🚗 Какой автомобиль Вас интересует? (Марка, модель, год)",
         LeadField.BUDGET: "💰 Какой бюджет Вы рассматриваете? (в USD, EUR или BYN)",
         LeadField.TIMELINE: "📅 Когда планируете покупку? (1-3 мес, 3-6 мес, >6 мес)",
-        LeadField.EXPERIENCE: "📦 У Вас есть опыт ввоза авто из Китая? (да/нет/первый раз)",
+        LeadField.EXPERIENCE: "📦 У вас есть опыт вождения или опыт покупки авто за рубежом?",
         LeadField.CONTACT: "📱 Оставьте телефон или @telegram для связи"
     }
     

@@ -16,6 +16,17 @@ EMPTY_PARSED = {
 }
 
 
+def fallback_message() -> str:
+    return (
+        'Не удалось обработать ваш ответ. Пожалуйста, напишите проще, '
+        'например: "BMW X5" или "бюджет 30 000 USD".'
+    )
+
+
+def is_empty_parsed(parsed: dict) -> bool:
+    return not any(parsed.get(field) for field in EMPTY_PARSED)
+
+
 class LLMClient:
     """Клиент для работы с OpenRouter API (парсинг сообщений)"""
 
@@ -24,10 +35,12 @@ class LLMClient:
         self.model = config.OPENROUTER_MODEL
         self.base_url = "https://openrouter.ai/api/v1/chat/completions"
 
-    async def parse_message(self, text: str) -> dict:
+    async def parse_message(self, text: str) -> tuple[dict, bool]:
         """
         Парсит сообщение клиента, извлекая поля.
-        Используется для первого сообщения или развёрнутых ответов.
+
+        Returns:
+            (parsed_fields, success)
         """
         text = text[: config.MAX_MESSAGE_LENGTH]
 
@@ -74,11 +87,14 @@ class LLMClient:
 
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-                return self._parse_json_content(content)
+                parsed = self._parse_json_content(content)
+                if is_empty_parsed(parsed):
+                    return EMPTY_PARSED.copy(), False
+                return parsed, True
 
         except Exception as e:
             logger.error("Ошибка LLM: %s", e)
-            return EMPTY_PARSED.copy()
+            return EMPTY_PARSED.copy(), False
 
     def _parse_json_content(self, content: str) -> dict:
         try:
