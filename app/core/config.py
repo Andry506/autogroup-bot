@@ -34,6 +34,7 @@ class Config:
     # === TELEGRAM ===
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "")
     MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID")
     
     # === OPENROUTER ===

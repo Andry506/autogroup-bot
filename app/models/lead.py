@@ -23,6 +23,8 @@ class Lead(Base):
     
     # Метаданные
     status = Column(String(50), default="collecting")  # collecting, completed, transferred
+    export_status = Column(String(50), default="")  # pending, exported, failed
+    pending_state = Column(JSON, default=dict)  # Промежуточное состояние диалога
     dialog_history = Column(JSON, default=list)  # История всего диалога
     
     # Даты

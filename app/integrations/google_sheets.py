@@ -7,6 +7,19 @@ from app.core.config import config
 
 class GoogleSheetsClient:
     """Клиент для работы с Google Sheets"""
+
+    SHEET_HEADERS = [
+        "Дата",
+        "Время",
+        "Chat ID",
+        "Username",
+        "Авто",
+        "Бюджет",
+        "Срок",
+        "Опыт",
+        "Контакт",
+        "Статус",
+    ]
     
     def __init__(self):
         self.credentials_file = config.GOOGLE_CREDENTIALS_FILE
@@ -72,12 +85,8 @@ class GoogleSheetsClient:
     
     def _setup_headers(self):
         """Создает заголовки для таблицы (если нужно создать новую)"""
-        headers = [
-            "ID", "Дата", "Время", "Chat ID", "Username",
-            "Авто", "Бюджет", "Срок", "Опыт", "Контакт", "Статус"
-        ]
         try:
-            self.sheet.insert_row(headers, index=1)
+            self.sheet.insert_row(self.SHEET_HEADERS, index=1)
             print("✅ Заголовки таблицы созданы")
         except Exception as e:
             print(f"❌ Ошибка создания заголовков: {e}")
@@ -85,7 +94,9 @@ class GoogleSheetsClient:
     def add_lead(self, lead_data: dict):
         """Добавляет заявку в таблицу"""
         if not self.sheet:
-            print(f"⚠️ Google Sheets недоступен. Заявка {lead_data.get('id')} не сохранена.")
+            print(
+                f"⚠️ Google Sheets недоступен. Заявка chat_id={lead_data.get('chat_id')} не сохранена."
+            )
             return False
         
         try:
@@ -94,7 +105,6 @@ class GoogleSheetsClient:
             now = datetime.now(tz)
             
             row = [
-                lead_data.get("id", ""),
                 now.strftime("%d.%m.%Y"),
                 now.strftime("%H:%M"),
                 lead_data.get("chat_id", ""),
@@ -104,11 +114,13 @@ class GoogleSheetsClient:
                 lead_data.get("timeline", ""),
                 lead_data.get("experience", ""),
                 lead_data.get("contact", ""),
-                lead_data.get("status", "Новая")
+                lead_data.get("status", "Новая"),
             ]
             
             self.sheet.append_row(row)
-            print(f"✅ Заявка {lead_data.get('id')} сохранена в Google Sheets")
+            print(
+                f"✅ Заявка chat_id={lead_data.get('chat_id')} сохранена в Google Sheets"
+            )
             return True
         except Exception as e:
             print(f"❌ Ошибка сохранения в Google Sheets: {e}")
