@@ -74,7 +74,6 @@ REMINDER_MAX_KEY = "reminder_max_reminders"
 REMINDER_INTERVAL_KEY = "reminder_interval_seconds"
 REMINDER_STARTED_AT_KEY = "reminder_started_at"
 AWAITING_MANUAL_CONTACT_KEY = "awaiting_manual_contact"
-<<<<<<< HEAD
 PENDING_FIELD_CONFIRM_KEY = "pending_field_confirm"
 
 CHANGE_KEYWORDS = [
@@ -97,8 +96,7 @@ FIELD_LABELS = {
 
 YES_CONFIRM_WORDS = ["да", "yes", "ага", "верно", "подтверждаю", "ок", "ok"]
 NO_CONFIRM_WORDS = ["нет", "no", "неа", "оставь", "отмена", "не надо"]
-=======
->>>>>>> 8640e323af3d0918a62f7d1c13a0bd70596589a2
+
 
 COMPLETED_LEAD_HINT = (
     "✅ Ваша заявка уже принята. Менеджер свяжется с вами в ближайшее время.\n\n"
@@ -1141,15 +1139,13 @@ async def handle_message(message: types.Message):
                 )
                 lead.dialog_history = trim_dialog_history(dialog)
                 await send_currency_clarification(message)
-<<<<<<< HEAD
                 await send_reply(message, "Хорошо, оставляю прежнее значение.")
                 await send_current_field_prompt(message, db, chat_id, expected_field)
                 db.commit()
                 return
             else:
                 dialog = list(lead.dialog_history or [])
-=======
->>>>>>> 8640e323af3d0918a62f7d1c13a0bd70596589a2
+
                 dialog.append(
                     {
                         "role": "user",
@@ -1296,7 +1292,6 @@ async def handle_message(message: types.Message):
                     lead.dialog_history = trim_dialog_history(dialog)
                     db.commit()
                     return
-<<<<<<< HEAD
             elif expected_field:
                 if expected_field.value == "budget":
                     budget_clarification = apply_budget_value(lead, chat_id, text, db)
@@ -1337,19 +1332,6 @@ async def handle_message(message: types.Message):
                         lead.id,
                         cleaned_value,
                     )
-=======
-            else:
-                cleaned_value = clean_text(text)
-                setattr(lead, expected_field.value, cleaned_value)
-                if expected_field.value == "contact":
-                    set_awaiting_manual_contact(db, chat_id, False)
-                logger.info(
-                    "📝 Поле %s заполнено напрямую для lead_id=%s: %s",
-                    expected_field.value,
-                    lead.id,
-                    cleaned_value,
-                )
->>>>>>> 8640e323af3d0918a62f7d1c13a0bd70596589a2
 
         # 6. СОХРАНЕНИЕ ИСТОРИИ
         dialog = list(lead.dialog_history or [])
