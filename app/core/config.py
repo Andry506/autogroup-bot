@@ -33,8 +33,10 @@ def _decode_credentials_json(raw: str) -> str:
 class Config:
     # === TELEGRAM ===
     BOT_TOKEN = os.getenv("BOT_TOKEN")
+
     WEBHOOK_URL = os.getenv("WEBHOOK_URL")
     WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "")
+
     MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID")
     
     # === OPENROUTER ===
@@ -45,8 +47,6 @@ class Config:
     GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
     GOOGLE_CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
     _credentials_json_raw = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
-
-
     GOOGLE_CREDENTIALS_JSON = _decode_credentials_json(_credentials_json_raw)
 
     # === НАСТРОЙКИ ===

@@ -834,6 +834,7 @@ async def health_check():
 @app.on_event("startup")
 async def on_startup():
     reminder_service.start()
+    
     await restore_reminders_from_db()
 
     db = Session()
