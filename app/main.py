@@ -543,8 +543,7 @@ async def health_check():
 @app.on_event("startup")
 async def on_startup():
     reminder_service.start()
-    await bot.set_webhook(url=config.WEBHOOK_URL, drop_pending_updates=True)
-    logger.info("🔗 Webhook установлен: %s", config.WEBHOOK_URL)
+    logger.info("⏳ Webhook не установлен автоматически, установи вручную через браузер")
 
 @app.on_event("shutdown")
 async def on_shutdown():
