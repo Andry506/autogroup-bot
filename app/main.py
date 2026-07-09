@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
@@ -23,7 +23,7 @@ from app.core.llm_client import LLMClient
 from app.core.telegram_utils import format_client_summary, format_manager_notification
 from app.integrations.google_sheets import GoogleSheetsClient
 from app.models.lead import Lead
-from app.services.fsm_service import FSMService, LEAD_FIELDS
+from app.services.fsm_service import FSMService, LEAD_FIELDS, LeadField
 from app.services.rate_limiter import RateLimiter
 from app.services.reminder_service import ReminderService
 
@@ -73,18 +73,56 @@ REMINDER_DELAY_KEY = "reminder_delay_seconds"
 REMINDER_MAX_KEY = "reminder_max_reminders"
 REMINDER_INTERVAL_KEY = "reminder_interval_seconds"
 REMINDER_STARTED_AT_KEY = "reminder_started_at"
+AWAITING_MANUAL_CONTACT_KEY = "awaiting_manual_contact"
+
+COMPLETED_LEAD_HINT = (
+    "✅ Ваша заявка уже принята. Менеджер свяжется с вами в ближайшее время.\n\n"
+    "Чтобы оставить новую заявку, отправьте /new"
+)
+
+HELP_TEXT = (
+    "ℹ️ <b>Справка по боту</b>\n\n"
+    "Я помогаю собрать заявку на автомобиль под пригон из США.\n"
+    "Отвечайте на вопросы по очереди — данные передадутся менеджеру.\n\n"
+    "<b>Команды:</b>\n"
+    "/start — начать работу с ботом\n"
+    "/new — оставить новую заявку\n"
+    "/cancel — отменить текущий диалог\n"
+    "/help — показать эту справку"
+)
+
+
+def get_welcome_with_car_question() -> str:
+    car_question = FSMService.get_question_for_field(LeadField.CAR)
+    return (
+        "👋 Здравствуйте! Я AI-агент для автобизнеса.\n\n"
+        "Я помогу собрать заявку на автомобиль.\n"
+        "Отвечайте на вопросы, и я передам данные менеджеру.\n\n"
+        f"{car_question}"
+    )
+
+
+def get_active_lead(db, chat_id: str) -> Lead | None:
+    """Возвращает незавершённую заявку пользователя."""
+    return (
+        db.query(Lead)
+        .filter(Lead.chat_id == chat_id, Lead.status != "completed")
+        .order_by(Lead.created_at.desc())
+        .first()
+    )
+
 
 def get_pending_state(db, chat_id: str) -> dict:
-    """Возвращает pending_state лида из БД."""
-    lead = db.query(Lead).filter(Lead.chat_id == chat_id).first()
+    """Возвращает pending_state активного лида из БД."""
+    lead = get_active_lead(db, chat_id)
     if not lead or not lead.pending_state:
         return {}
     return dict(lead.pending_state)
 
 
 def set_pending_state(db, chat_id: str, state: dict | None) -> None:
-    """Сохраняет pending_state лида в БД."""
-    lead = db.query(Lead).filter(Lead.chat_id == chat_id).first()
+    """Сохраняет pending_state активного лида в БД."""
+    lead = get_active_lead(db, chat_id)
     if not lead:
         return
     lead.pending_state = state or {}
@@ -107,6 +145,19 @@ def set_pending_budget_currency(db, chat_id: str, amount: str) -> None:
 def clear_pending_budget_currency(db, chat_id: str) -> None:
     state = get_pending_state(db, chat_id)
     state.pop(PENDING_BUDGET_KEY, None)
+    set_pending_state(db, chat_id, state)
+
+
+def is_awaiting_manual_contact(db, chat_id: str) -> bool:
+    return bool(get_pending_state(db, chat_id).get(AWAITING_MANUAL_CONTACT_KEY))
+
+
+def set_awaiting_manual_contact(db, chat_id: str, value: bool = True) -> None:
+    state = get_pending_state(db, chat_id)
+    if value:
+        state[AWAITING_MANUAL_CONTACT_KEY] = True
+    else:
+        state.pop(AWAITING_MANUAL_CONTACT_KEY, None)
     set_pending_state(db, chat_id, state)
 
 
@@ -267,10 +318,29 @@ def get_experience_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text="Да, есть опыт")],
             [KeyboardButton(text="Нет, первый раз")],
-            [KeyboardButton(text="Нужна консультация")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True
+    )
+
+
+def get_currency_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="USD"), KeyboardButton(text="EUR"), KeyboardButton(text="BYN")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def get_new_application_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="/new")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 def get_contact_keyboard() -> ReplyKeyboardMarkup:
@@ -441,6 +511,63 @@ async def send_reply(message: types.Message, text: str, **kwargs) -> None:
         logger.error("❌ Ошибка отправки: %s", e, exc_info=True)
         raise
 
+
+async def send_currency_clarification(message: types.Message) -> None:
+    await send_reply(
+        message,
+        CURRENCY_CLARIFICATION_QUESTION,
+        reply_markup=get_currency_keyboard(),
+    )
+
+
+async def schedule_question_reminder(
+    db,
+    chat_id: str,
+    question: str,
+) -> None:
+    reminder_service.schedule_reminder(
+        chat_id=chat_id,
+        question_text=question,
+        delay_seconds=config.REMINDER_DELAY_SECONDS,
+        max_reminders=config.REMINDER_MAX_COUNT,
+        interval_seconds=config.REMINDER_INTERVAL_SECONDS,
+    )
+    persist_reminder_state(
+        db,
+        chat_id,
+        question,
+        config.REMINDER_DELAY_SECONDS,
+        config.REMINDER_MAX_COUNT,
+        config.REMINDER_INTERVAL_SECONDS,
+    )
+
+
+async def begin_lead_dialog(
+    message: types.Message,
+    db,
+    lead: Lead,
+    *,
+    include_welcome: bool = True,
+) -> None:
+    """Отправляет стартовое сообщение и планирует напоминание для первого вопроса."""
+    chat_id = str(message.chat.id)
+    welcome_text = get_welcome_with_car_question() if include_welcome else FSMService.get_question_for_field(LeadField.CAR)
+
+    await send_reply(message, welcome_text)
+    await schedule_question_reminder(db, chat_id, welcome_text)
+
+    dialog = list(lead.dialog_history or [])
+    dialog.append(
+        {
+            "role": "assistant",
+            "text": welcome_text,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    lead.dialog_history = trim_dialog_history(dialog)
+    db.commit()
+    logger.info("🆕 Начат диалог для lead_id=%s", lead.id)
+
 # === ЗАВЕРШЕНИЕ ЗАЯВКИ ===
 async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) -> None:
     if lead.status == "completed":
@@ -465,6 +592,12 @@ async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) ->
         message,
         format_client_summary(lead),
         parse_mode=ParseMode.HTML,
+    )
+
+    await send_reply(
+        message,
+        "Хотите оставить ещё одну заявку? Нажмите кнопку ниже или отправьте /new",
+        reply_markup=get_new_application_keyboard(),
     )
 
     # Уведомление менеджеру
@@ -497,6 +630,76 @@ async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) ->
         lead.id,
         lead.export_status,
     )
+
+# === КОМАНДЫ БОТА ===
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await send_reply(
+        message,
+        "👋 Здравствуйте! Я AI-агент для автобизнеса.\n\n"
+        "Я помогу собрать заявку на автомобиль под пригон из США.\n"
+        "Отвечайте на мои вопросы, и я передам данные менеджеру.\n\n"
+        "Чтобы начать заявку, отправьте /new или просто напишите сообщение.",
+    )
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    await send_reply(message, HELP_TEXT, parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message):
+    chat_id = str(message.chat.id)
+    db = Session()
+    try:
+        cancel_reminder_for_chat(db, chat_id)
+        deleted = (
+            db.query(Lead)
+            .filter(Lead.chat_id == chat_id, Lead.status != "completed")
+            .delete()
+        )
+        db.commit()
+        await send_reply(
+            message,
+            "Диалог отменён. Чтобы начать заново, отправьте /start",
+            reply_markup=remove_keyboard(),
+        )
+        logger.info("🛑 Диалог отменён для chat_id=%s, удалено заявок: %s", chat_id, deleted)
+    except Exception as e:
+        logger.error("❌ Ошибка отмены диалога: %s", e)
+        await send_reply(message, "⚠️ Ошибка при отмене диалога. Попробуйте позже.")
+        db.rollback()
+    finally:
+        db.close()
+
+
+@dp.message(Command("new"))
+async def cmd_new(message: types.Message):
+    chat_id = str(message.chat.id)
+    username = message.from_user.username or "unknown"
+    db = Session()
+    try:
+        active_lead = get_active_lead(db, chat_id)
+        if active_lead:
+            await send_reply(
+                message,
+                "У вас уже есть активная заявка. Продолжайте диалог или отправьте /cancel.",
+            )
+            return
+
+        cancel_reminder_for_chat(db, chat_id)
+        lead = Lead(chat_id=chat_id, username=username, pending_state={})
+        db.add(lead)
+        db.flush()
+        await begin_lead_dialog(message, db, lead)
+    except Exception as e:
+        logger.error("❌ Ошибка команды /new: %s", e, exc_info=True)
+        await send_reply(message, "⚠️ Не удалось начать новую заявку. Попробуйте позже.")
+        db.rollback()
+    finally:
+        db.close()
+
 
 # === ТЕСТОВАЯ КОМАНДА ДЛЯ ОЧИСТКИ ===
 @dp.message(lambda message: message.text and message.text.startswith('/clean'))
@@ -546,14 +749,27 @@ async def handle_message(message: types.Message):
 
     # === ОБРАБОТКА КНОПКИ "ВВЕСТИ ВРУЧНУЮ" ===
     if message.text and message.text == "Ввести вручную":
-        await send_reply(
-            message,
-            "✍️ Введите номер телефона в формате:\n"
-            "• +375 29 123 45 67\n"
-            "• 8 (029) 123-45-67\n"
-            "• или @username",
-            reply_markup=remove_keyboard(),
-        )
+        db = Session()
+        try:
+            lead = get_active_lead(db, str(message.chat.id))
+            if lead:
+                set_awaiting_manual_contact(db, str(message.chat.id), True)
+                db.commit()
+            await send_reply(
+                message,
+                "✍️ Введите номер телефона в формате:\n"
+                "• +375 29 123 45 67\n"
+                "• 8 (029) 123-45-67\n"
+                "• или @username",
+                reply_markup=remove_keyboard(),
+            )
+        finally:
+            db.close()
+        return
+
+    # === НОВАЯ ЗАЯВКА ЧЕРЕЗ КНОПКУ ===
+    if message.text and message.text.strip() in {"/new", "Оставить новую заявку"}:
+        await cmd_new(message)
         return
 
     # === ОБРАБОТКА КОНТАКТА (ОТПРАВКА НОМЕРА) ===
@@ -561,10 +777,11 @@ async def handle_message(message: types.Message):
         phone = message.contact.phone_number
         db = Session()
         try:
-            lead = db.query(Lead).filter(Lead.chat_id == chat_id).first()
+            lead = get_active_lead(db, chat_id)
             if lead and lead.status != "completed":
                 clean_phone = clean_text(phone)
                 setattr(lead, "contact", clean_phone)
+                set_awaiting_manual_contact(db, chat_id, False)
                 db.commit()
                 logger.info(f"📱 Получен номер телефона: {clean_phone}")
                 text = clean_phone
@@ -604,34 +821,44 @@ async def handle_message(message: types.Message):
         cancel_reminder_for_chat(db, chat_id)
         db.commit()
 
-        # 1. ПОИСК/СОЗДАНИЕ ЛИДА
-        lead = db.query(Lead).filter(Lead.chat_id == chat_id).first()
+        lead = get_active_lead(db, chat_id)
+        is_new_lead = False
+        just_sent_welcome = False
 
         if not lead:
-            lead = Lead(chat_id=chat_id, username=username)
+            has_completed = (
+                db.query(Lead)
+                .filter(Lead.chat_id == chat_id, Lead.status == "completed")
+                .count()
+                > 0
+            )
+            if has_completed:
+                await send_reply(message, COMPLETED_LEAD_HINT)
+                return
+
+            lead = Lead(chat_id=chat_id, username=username, pending_state={})
             db.add(lead)
             db.flush()
+            is_new_lead = True
             logger.info("🆕 Создан новый лид: lead_id=%s", lead.id)
-            
-            # === ПРИВЕТСТВИЕ ДЛЯ НОВОГО ПОЛЬЗОВАТЕЛЯ ===
-            welcome_text = (
-                "👋 Здравствуйте! Я AI-агент для автобизнеса.\n\n"
-                "Я помогу собрать заявку на автомобиль.\n"
-                "Отвечайте на вопросы, и я передам данные менеджеру."
-            )
-            await send_reply(message, welcome_text)
-            # =========================================
-            
         elif username != "unknown" and lead.username != username:
             lead.username = username
 
-        # 2. ЗАЩИТА ОТ ДУБЛЕЙ
-        if lead.status == "completed":
-            await send_reply(
-                message,
-                "✅ Ваша заявка уже принята. Менеджер свяжется с вами в ближайшее время.",
+        if is_new_lead:
+            welcome_text = get_welcome_with_car_question()
+            await send_reply(message, welcome_text)
+            just_sent_welcome = True
+            await schedule_question_reminder(db, chat_id, welcome_text)
+            dialog = list(lead.dialog_history or [])
+            dialog.append(
+                {
+                    "role": "assistant",
+                    "text": welcome_text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
             )
-            return
+            lead.dialog_history = trim_dialog_history(dialog)
+            db.commit()
 
         # 3. ПОЛУЧАЕМ ТЕКУЩИЕ ДАННЫЕ
         lead_data = get_lead_data(lead)
@@ -646,16 +873,25 @@ async def handle_message(message: types.Message):
                     lead.budget,
                 )
             else:
-                await send_reply(message, CURRENCY_CLARIFICATION_QUESTION)
+                await send_currency_clarification(message)
                 return
 
         # 4. ЕСЛИ ЕСТЬ ОЖИДАЕМОЕ ПОЛЕ — ПРОВЕРЯЕМ ОТВЕТ
         if expected_field and expected_field.value in ["budget", "timeline", "experience", "contact"]:
             field_name = expected_field.value
             is_valid = is_answer_valid(text, field_name)
+
+            if (
+                field_name == "contact"
+                and is_awaiting_manual_contact(db, chat_id)
+                and text.strip()
+            ):
+                is_valid = True
             
             if not is_valid:
-                keyboard = get_keyboard_for_field(field_name)
+                keyboard = None if (
+                    field_name == "contact" and is_awaiting_manual_contact(db, chat_id)
+                ) else get_keyboard_for_field(field_name)
                 if keyboard:
                     await send_reply(
                         message,
@@ -687,6 +923,8 @@ async def handle_message(message: types.Message):
         # Если это чистое приветствие и у лида нет данных — не парсим
         if is_pure_greeting and not any(lead_data.values()):
             logger.info(f"👋 Обнаружено чистое приветствие, пропускаем парсинг для lead_id={lead.id}")
+            if just_sent_welcome:
+                return
             pass
         elif should_use_llm(lead_data, text):
             parsed = await llm.parse_message(text)
@@ -708,7 +946,7 @@ async def handle_message(message: types.Message):
                     }
                 )
                 lead.dialog_history = trim_dialog_history(dialog)
-                await send_reply(message, budget_clarification)
+                await send_currency_clarification(message)
                 dialog.append(
                     {
                         "role": "assistant",
@@ -737,7 +975,7 @@ async def handle_message(message: types.Message):
                         }
                     )
                     lead.dialog_history = trim_dialog_history(dialog)
-                    await send_reply(message, budget_clarification)
+                    await send_currency_clarification(message)
                     dialog.append(
                         {
                             "role": "assistant",
@@ -751,6 +989,8 @@ async def handle_message(message: types.Message):
             else:
                 cleaned_value = clean_text(text)
                 setattr(lead, expected_field.value, cleaned_value)
+                if expected_field.value == "contact":
+                    set_awaiting_manual_contact(db, chat_id, False)
                 logger.info(
                     "📝 Поле %s заполнено напрямую для lead_id=%s: %s",
                     expected_field.value,
@@ -774,24 +1014,23 @@ async def handle_message(message: types.Message):
         next_field = FSMService.get_next_field(lead_data)
 
         if next_field:
-            question = FSMService.get_question_for_field(next_field)
-            await send_reply(message, question)
+            if just_sent_welcome and next_field == LeadField.CAR:
+                return
 
-            reminder_service.schedule_reminder(
-                chat_id=chat_id,
-                question_text=question,
-                delay_seconds=config.REMINDER_DELAY_SECONDS,
-                max_reminders=config.REMINDER_MAX_COUNT,
-                interval_seconds=config.REMINDER_INTERVAL_SECONDS,
-            )
-            persist_reminder_state(
-                db,
-                chat_id,
-                question,
-                config.REMINDER_DELAY_SECONDS,
-                config.REMINDER_MAX_COUNT,
-                config.REMINDER_INTERVAL_SECONDS,
-            )
+            question = FSMService.get_question_for_field(next_field)
+            reply_markup = None
+            if next_field == LeadField.CONTACT and not is_awaiting_manual_contact(db, chat_id):
+                reply_markup = get_contact_keyboard()
+            elif next_field == LeadField.BUDGET:
+                reply_markup = get_budget_keyboard()
+            elif next_field == LeadField.TIMELINE:
+                reply_markup = get_timeline_keyboard()
+            elif next_field == LeadField.EXPERIENCE:
+                reply_markup = get_experience_keyboard()
+
+            await send_reply(message, question, reply_markup=reply_markup)
+
+            await schedule_question_reminder(db, chat_id, question)
             logger.info("⏰ Напоминание запланировано для chat_id=%s", chat_id)
 
             dialog.append(

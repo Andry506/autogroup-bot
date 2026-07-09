@@ -70,7 +70,7 @@ class UpdateService:
             elif "нет" in text_clean.lower() or "не" in text_clean.lower():
                 return "Нет, первый раз"
             elif "консультация" in text_clean.lower():
-                return "Нужна консультация"
+                return None
             return None
             
         elif field == "contact":
