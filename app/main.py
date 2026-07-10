@@ -782,17 +782,24 @@ async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) ->
         reply_markup=get_new_application_keyboard(),
     )
 
-    # Уведомление менеджеру
-    if config.MANAGER_CHAT_ID:
+    # Уведомление в группу или менеджеру
+    notification_chat_id = config.GROUP_CHAT_ID or config.MANAGER_CHAT_ID
+    if notification_chat_id:
         try:
             await bot.send_message(
-                chat_id=int(config.MANAGER_CHAT_ID),
+                chat_id=int(notification_chat_id),
                 text=format_manager_notification(lead),
                 parse_mode=ParseMode.HTML,
             )
-            logger.info("📨 Уведомление отправлено менеджеру: lead_id=%s", lead.id)
+            if config.GROUP_CHAT_ID:
+                logger.info("📨 Уведомление отправлено в группу: lead_id=%s", lead.id)
+            else:
+                logger.info("📨 Уведомление отправлено менеджеру: lead_id=%s", lead.id)
         except Exception as e:
-            logger.error("❌ Ошибка отправки уведомления менеджеру: %s", e)
+            if config.GROUP_CHAT_ID:
+                logger.error("❌ Ошибка отправки уведомления в группу: %s", e)
+            else:
+                logger.error("❌ Ошибка отправки уведомления менеджеру: %s", e)
 
     # Сохраняем в Google Sheets
     try:
@@ -918,6 +925,10 @@ async def clean_my_leads(message: types.Message):
 # === ОБРАБОТЧИК СООБЩЕНИЙ ===
 @dp.message()
 async def handle_message(message: types.Message):
+    # Игнорируем сообщения из групп (чтобы бот не отвечал)
+    if message.chat.type in ("group", "supergroup"):
+        return
+
     chat_id = str(message.chat.id)
     username = message.from_user.username or "unknown"
 
