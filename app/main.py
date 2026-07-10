@@ -83,6 +83,7 @@ PENDING_FIELD_CONFIRM_KEY = "pending_field_confirm"
 GREETING_SENT_KEY = "greeting_sent"
 WAITING_FOR_USER_KEY = "waiting_for_user"
 
+
 CHANGE_KEYWORDS = [
     "передумал",
     "хочу",
@@ -143,14 +144,12 @@ def get_start_greeting() -> str:
         "Чтобы начать заявку, отправьте /new или просто напишите сообщение."
     )
 
-
 def get_welcome_text() -> str:
     return (
         "Здравствуйте! Я AI-помощник компании AutoGroup!\n"
         "Я помогу собрать заявку на автомобиль \"мечты\"!\n"
         "Пожалуйста, отвечайте на вопросы, и я передам данные менеджеру."
     )
-
 
 def get_welcome_with_car_question() -> str:
     car_question = FSMService.get_question_for_field(LeadField.CAR)
@@ -753,6 +752,10 @@ async def send_current_field_prompt(
 
     question = FSMService.get_question_for_field(expected_field)
     reply_markup = get_reply_markup_for_field(db, chat_id, expected_field)
+<<<<<<< HEAD
+=======
+
+>>>>>>> b4f8d2bbba99a31ddc6f49e89adb43c52ffefe40
 
     await send_reply(
         message,
@@ -1304,6 +1307,7 @@ async def handle_message(message: types.Message):
             return
 
         if not skip_field_processing:
+            
             # 4. ЕСЛИ ЕСТЬ ОЖИДАЕМОЕ ПОЛЕ — ПРОВЕРЯЕМ ОТВЕТ
             if (
                 not skip_field_processing
@@ -1417,6 +1421,10 @@ async def handle_message(message: types.Message):
 
             question = FSMService.get_question_for_field(next_field)
             reply_markup = get_reply_markup_for_field(db, chat_id, next_field)
+<<<<<<< HEAD
+=======
+
+>>>>>>> b4f8d2bbba99a31ddc6f49e89adb43c52ffefe40
 
             await send_reply(message, question, reply_markup=reply_markup)
 
