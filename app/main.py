@@ -1307,7 +1307,7 @@ async def handle_message(message: types.Message):
             return
 
         if not skip_field_processing:
-            
+
             # 4. ЕСЛИ ЕСТЬ ОЖИДАЕМОЕ ПОЛЕ — ПРОВЕРЯЕМ ОТВЕТ
             if (
                 not skip_field_processing
@@ -1421,11 +1421,6 @@ async def handle_message(message: types.Message):
 
             question = FSMService.get_question_for_field(next_field)
             reply_markup = get_reply_markup_for_field(db, chat_id, next_field)
-<<<<<<< HEAD
-=======
-
->>>>>>> b4f8d2bbba99a31ddc6f49e89adb43c52ffefe40
-
             await send_reply(message, question, reply_markup=reply_markup)
 
             await schedule_question_reminder(db, chat_id, question)
