@@ -132,13 +132,20 @@ HELP_TEXT = (
 
 def get_start_greeting() -> str:
     return (
+<<<<<<< HEAD
         "Здравствуйте! Я AI-помощник компании AutoGroup!\n"
         "Я помогу собрать заявку на автомобиль \"мечты\"!\n"
         "Пожалуйста, отвечайте на вопросы, и я передам данные менеджеру.\n\n"
+=======
+        "👋 Здравствуйте! Я AI-агент для автобизнеса.\n\n"
+        "Я помогу собрать заявку на автомобиль под пригон из-за рубежа.\n"
+        "Отвечайте на мои вопросы, и я передам данные менеджеру.\n\n"
+>>>>>>> 414bad55dca48c4dd3dcd3283cce33153cd4af8c
         "Чтобы начать заявку, отправьте /new или просто напишите сообщение."
     )
 
 
+<<<<<<< HEAD
 def get_welcome_text() -> str:
     return (
         "Здравствуйте! Я AI-помощник компании AutoGroup!\n"
@@ -147,6 +154,8 @@ def get_welcome_text() -> str:
     )
 
 
+=======
+>>>>>>> 414bad55dca48c4dd3dcd3283cce33153cd4af8c
 def get_welcome_with_car_question() -> str:
     car_question = FSMService.get_question_for_field(LeadField.CAR)
     return f"{get_welcome_text()}\n\n{car_question}"
@@ -689,7 +698,17 @@ async def send_current_field_prompt(
         return
 
     question = FSMService.get_question_for_field(expected_field)
+<<<<<<< HEAD
     reply_markup = get_reply_markup_for_field(db, chat_id, expected_field)
+=======
+    reply_markup = None
+    if expected_field == LeadField.CONTACT and not is_awaiting_manual_contact(db, chat_id):
+        reply_markup = get_contact_keyboard()
+    elif expected_field == LeadField.TIMELINE:
+        reply_markup = get_timeline_keyboard()
+    elif expected_field == LeadField.EXPERIENCE:
+        reply_markup = get_experience_keyboard()
+>>>>>>> 414bad55dca48c4dd3dcd3283cce33153cd4af8c
 
     await send_reply(
         message,
@@ -1230,11 +1249,32 @@ async def handle_message(message: types.Message):
             return
 
         if not skip_field_processing:
+<<<<<<< HEAD
+=======
+            # 3.1 УТОЧНЕНИЕ ВАЛЮТЫ ДЛЯ БЮДЖЕТА
+            if has_pending_budget_currency(db, chat_id):
+                if try_apply_pending_budget_currency(lead, chat_id, text, db):
+                    skip_field_processing = True
+                    db.commit()
+                    logger.info(
+                        "💱 Бюджет с валютой сохранён для chat_id=%s: %s",
+                        chat_id,
+                        lead.budget,
+                    )
+                else:
+                    await send_currency_clarification(message)
+                    return
+
+>>>>>>> 414bad55dca48c4dd3dcd3283cce33153cd4af8c
             # 4. ЕСЛИ ЕСТЬ ОЖИДАЕМОЕ ПОЛЕ — ПРОВЕРЯЕМ ОТВЕТ
             if (
                 not skip_field_processing
                 and expected_field
+<<<<<<< HEAD
                 and expected_field.value in VALIDATED_FIELDS
+=======
+                and expected_field.value in ["budget", "timeline", "experience", "contact"]
+>>>>>>> 414bad55dca48c4dd3dcd3283cce33153cd4af8c
             ):
                 field_name = expected_field.value
                 is_valid = is_answer_valid(text, field_name)
@@ -1342,7 +1382,17 @@ async def handle_message(message: types.Message):
                 return
 
             question = FSMService.get_question_for_field(next_field)
+<<<<<<< HEAD
             reply_markup = get_reply_markup_for_field(db, chat_id, next_field)
+=======
+            reply_markup = None
+            if next_field == LeadField.CONTACT and not is_awaiting_manual_contact(db, chat_id):
+                reply_markup = get_contact_keyboard()
+            elif next_field == LeadField.TIMELINE:
+                reply_markup = get_timeline_keyboard()
+            elif next_field == LeadField.EXPERIENCE:
+                reply_markup = get_experience_keyboard()
+>>>>>>> 414bad55dca48c4dd3dcd3283cce33153cd4af8c
 
             await send_reply(message, question, reply_markup=reply_markup)
 
