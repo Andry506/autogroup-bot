@@ -14,7 +14,7 @@ def format_client_summary(lead: Lead) -> str:
         f"🚗 <b>Авто:</b> {escape_html(lead.car)}\n"
         f"💰 <b>Бюджет:</b> {escape_html(lead.budget)}\n"
         f"📅 <b>Срок:</b> {escape_html(lead.timeline)}\n"
-        f"📦 <b>Опыт:</b> {escape_html(lead.experience)}\n"
+        f"🌍 <b>Рынок:</b> {escape_html(lead.experience)}\n"
         f"📱 <b>Контакт:</b> {escape_html(lead.contact)}\n\n"
         "👨‍💼 Менеджер свяжется с вами в ближайшее время!"
     )
@@ -28,7 +28,7 @@ def format_manager_notification(lead: Lead) -> str:
         f"Авто: {lead.car}\n"
         f"Бюджет: {lead.budget}\n"
         f"Срок: {lead.timeline}\n"
-        f"Опыт: {lead.experience}\n"
+        f"Рынок: {lead.experience}\n"
         f"Контакт: {lead.contact}\n"
         f"Username: @{lead.username or 'не указан'}\n"
         f"Chat ID: {lead.chat_id}\n\n"

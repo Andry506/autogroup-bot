@@ -1,9 +1,28 @@
 import asyncio
 import logging
-from typing import Dict, Optional
+import re
+from typing import Dict
 from aiogram import Bot
 
 logger = logging.getLogger(__name__)
+
+LATER_PHRASES = ["позже", "потом", "позднее", "не сейчас", "отложить"]
+
+POSTPONE_ACK_MESSAGE = (
+    "Хорошо, я подожду. Напишите, когда будете готовы продолжить."
+)
+
+
+def is_later_response(text: str) -> bool:
+    """Проверяет, просит ли пользователь отложить ответ."""
+    normalized = re.sub(r"[^\w\s]", " ", text.lower()).strip()
+    words = normalized.split()
+    if not words:
+        return False
+    if len(words) <= 3 and any(phrase in normalized for phrase in LATER_PHRASES):
+        return True
+    return normalized in LATER_PHRASES
+
 
 class ReminderService:
     """
@@ -124,6 +143,15 @@ class ReminderService:
         
         if chat_id in self._reminder_count:
             del self._reminder_count[chat_id]
+
+    def acknowledge_postpone(self, chat_id: str) -> str:
+        """
+        Обрабатывает ответ «позже» на напоминание или в диалоге.
+        Отменяет активные напоминания и возвращает текст подтверждения.
+        """
+        self.cancel_reminder(chat_id)
+        logger.info("⏸️ Пользователь отложил ответ, напоминание отменено: chat_id=%s", chat_id)
+        return POSTPONE_ACK_MESSAGE
 
     def stop(self):
         """Останавливает все напоминания"""

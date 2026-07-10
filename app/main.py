@@ -26,7 +26,11 @@ from app.integrations.google_sheets import GoogleSheetsClient
 from app.models.lead import Lead
 from app.services.fsm_service import FSMService, LEAD_FIELDS, LeadField
 from app.services.rate_limiter import RateLimiter
-from app.services.reminder_service import ReminderService
+from app.services.reminder_service import (
+    POSTPONE_ACK_MESSAGE,
+    ReminderService,
+    is_later_response,
+)
 
 # === НАСТРОЙКА ЛОГОВ ===
 logging.basicConfig(
@@ -76,6 +80,8 @@ REMINDER_INTERVAL_KEY = "reminder_interval_seconds"
 REMINDER_STARTED_AT_KEY = "reminder_started_at"
 AWAITING_MANUAL_CONTACT_KEY = "awaiting_manual_contact"
 PENDING_FIELD_CONFIRM_KEY = "pending_field_confirm"
+GREETING_SENT_KEY = "greeting_sent"
+WAITING_FOR_USER_KEY = "waiting_for_user"
 
 CHANGE_KEYWORDS = [
     "передумал",
@@ -91,9 +97,22 @@ FIELD_LABELS = {
     "car": "авто",
     "budget": "бюджет",
     "timeline": "срок",
-    "experience": "опыт",
+    "experience": "рынок",
     "contact": "контакт",
 }
+
+BUDGET_OPTIONS = [
+    "до 20 000 USD",
+    "20 000 - 40 000 USD",
+    "40 000 - 60 000 USD",
+    "более 60 000 USD",
+]
+
+MARKET_OPTIONS = ["США", "Европа", "Корея", "Китай"]
+
+TIMELINE_OPTIONS = ["1-3 месяца", "3-6 месяцев", "более 6 месяцев"]
+
+VALIDATED_FIELDS = ["car", "budget", "timeline", "experience", "contact"]
 
 YES_CONFIRM_WORDS = ["да", "yes", "ага", "верно", "подтверждаю", "ок", "ok"]
 NO_CONFIRM_WORDS = ["нет", "no", "неа", "оставь", "отмена", "не надо"]
@@ -116,14 +135,26 @@ HELP_TEXT = (
 )
 
 
+def get_start_greeting() -> str:
+    return (
+        "Здравствуйте! Я AI-помощник компании AutoGroup!\n"
+        "Я помогу собрать заявку на автомобиль \"мечты\"!\n"
+        "Пожалуйста, отвечайте на вопросы, и я передам данные менеджеру.\n\n"
+        "Чтобы начать заявку, отправьте /new или просто напишите сообщение."
+    )
+
+
+def get_welcome_text() -> str:
+    return (
+        "Здравствуйте! Я AI-помощник компании AutoGroup!\n"
+        "Я помогу собрать заявку на автомобиль \"мечты\"!\n"
+        "Пожалуйста, отвечайте на вопросы, и я передам данные менеджеру."
+    )
+
+
 def get_welcome_with_car_question() -> str:
     car_question = FSMService.get_question_for_field(LeadField.CAR)
-    return (
-        "👋 Здравствуйте! Я AI-агент для автобизнеса.\n\n"
-        "Я помогу собрать заявку на автомобиль.\n"
-        "Отвечайте на вопросы, и я передам данные менеджеру.\n\n"
-        f"{car_question}"
-    )
+    return f"{get_welcome_text()}\n\n{car_question}"
 
 
 def get_active_lead(db, chat_id: str) -> Lead | None:
@@ -183,6 +214,62 @@ def set_awaiting_manual_contact(db, chat_id: str, value: bool = True) -> None:
     else:
         state.pop(AWAITING_MANUAL_CONTACT_KEY, None)
     set_pending_state(db, chat_id, state)
+
+
+def is_waiting_for_user(db, chat_id: str) -> bool:
+    return bool(get_pending_state(db, chat_id).get(WAITING_FOR_USER_KEY))
+
+
+def set_waiting_for_user(db, chat_id: str, value: bool = True) -> None:
+    state = get_pending_state(db, chat_id)
+    if value:
+        state[WAITING_FOR_USER_KEY] = True
+    else:
+        state.pop(WAITING_FOR_USER_KEY, None)
+    set_pending_state(db, chat_id, state)
+
+
+def clear_waiting_for_user(db, chat_id: str) -> None:
+    set_waiting_for_user(db, chat_id, False)
+
+
+async def handle_postpone_request(message: types.Message, chat_id: str) -> None:
+    """Обрабатывает отложенный ответ: отменяет напоминание, сохраняет FSM."""
+    db = Session()
+    try:
+        reminder_service.acknowledge_postpone(chat_id)
+        lead = get_active_lead(db, chat_id)
+        if lead:
+            clear_reminder_state(db, chat_id)
+            set_waiting_for_user(db, chat_id, True)
+            dialog = list(lead.dialog_history or [])
+            dialog.append(
+                {
+                    "role": "user",
+                    "text": message.text.strip() if message.text else "позже",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            dialog.append(
+                {
+                    "role": "assistant",
+                    "text": POSTPONE_ACK_MESSAGE,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            lead.dialog_history = trim_dialog_history(dialog)
+            db.commit()
+            logger.info("⏸️ Пользователь отложил ответ: chat_id=%s, lead_id=%s", chat_id, lead.id)
+        else:
+            logger.info("⏸️ Пользователь отложил ответ без активной заявки: chat_id=%s", chat_id)
+
+        await send_reply(message, POSTPONE_ACK_MESSAGE)
+    except Exception as e:
+        logger.error("❌ Ошибка обработки отложенного ответа: %s", e, exc_info=True)
+        await send_reply(message, POSTPONE_ACK_MESSAGE)
+        db.rollback()
+    finally:
+        db.close()
 
 
 def persist_reminder_state(
@@ -274,6 +361,8 @@ async def restore_reminders_from_db() -> None:
 
         for lead in leads:
             state = lead.pending_state or {}
+            if state.get(WAITING_FOR_USER_KEY):
+                continue
             if not state.get(REMINDER_ACTIVE_KEY):
                 continue
 
@@ -329,23 +418,28 @@ def get_budget_keyboard() -> ReplyKeyboardMarkup:
 def get_timeline_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="До 1 месяца")],
             [KeyboardButton(text="1-3 месяца")],
-            [KeyboardButton(text="Более 3 месяцев")],
+            [KeyboardButton(text="3-6 месяцев")],
+            [KeyboardButton(text="более 6 месяцев")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
 
-def get_experience_keyboard() -> ReplyKeyboardMarkup:
+def get_market_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Да, есть опыт")],
-            [KeyboardButton(text="Нет, первый раз")],
+            [KeyboardButton(text="США"), KeyboardButton(text="Европа")],
+            [KeyboardButton(text="Корея"), KeyboardButton(text="Китай")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
+
+
+def get_experience_keyboard() -> ReplyKeyboardMarkup:
+    """Алиас для совместимости — клавиатура выбора рынка."""
+    return get_market_keyboard()
 
 
 def get_currency_keyboard() -> ReplyKeyboardMarkup:
@@ -397,42 +491,50 @@ def is_answer_valid(text: str, field_name: str) -> bool:
     Если ответ невнятный — вернет False, и бот покажет кнопки.
     """
     text_lower = text.lower().strip()
-    
+    text_stripped = text.strip()
+
+    if field_name == "car":
+        if not re.search(r"[a-zA-Zа-яА-ЯёЁ]", text):
+            return False
+        if re.fullmatch(r"[\d\s\W]+", text_stripped):
+            return False
+        return len(text_stripped) >= 2
+
     if field_name == "budget":
-        if not re.search(r'\d+', text):
-            return False
-        vague_words = ["сколько", "столько", "нормально", "хорошо", "норм", "как", "зависит"]
-        if any(word in text_lower for word in vague_words):
-            return False
-        return True
-        
-    elif field_name == "timeline":
-        time_words = ["месяц", "день", "недел", "год", "срочн", "быстр", "скоро", "сегодня", "завтра", "мес", "1-3", "3-6", "6+", ">6"]
-        if not any(word in text_lower for word in time_words):
-            return False
-        return True
-        
-    elif field_name == "experience":
-        experience_words = ["да", "нет", "первый", "есть", "не", "опыт", "ввоз", "покупал", "заказывал", "вроде", "помню"]
-        if not any(word in text_lower for word in experience_words):
-            return False
-        return True
-        
-    elif field_name == "contact":
-        # Очищаем от пробелов и спецсимволов
-        cleaned_text = re.sub(r'[\s\(\)\-]', '', text)
-        # Проверяем телефон: +375291015272 или 375291015272
-        if re.search(r'\+?\d{10,15}', cleaned_text):
+        return text_stripped in BUDGET_OPTIONS
+
+    if field_name == "timeline":
+        return text_stripped in TIMELINE_OPTIONS
+
+    if field_name == "experience":
+        return text_stripped in MARKET_OPTIONS
+
+    if field_name == "contact":
+        if re.search(r"@\w+", text_stripped):
             return True
-        # Проверяем @username
-        if re.search(r'@\w+', text):
-            return True
-        # Если текст состоит только из цифр, пробелов, +, (, ), -
-        if re.match(r'^[\d\s\+\(\)-]+$', text):
-            return True
+        cleaned_text = re.sub(r"[\s\(\)\-]", "", text_stripped)
+        if re.search(r"\+?\d{10,15}", cleaned_text):
+            return not re.search(r"[a-zA-Zа-яА-ЯёЁ]", re.sub(r"@\w+", "", text_stripped))
         return False
-        
+
     return True
+
+
+def get_invalid_answer_message(field_name: str) -> str:
+    messages = {
+        "car": (
+            "Пожалуйста, напишите марку и модель автомобиля "
+            "(например, BMW X5 или Toyota Camry)."
+        ),
+        "budget": "Пожалуйста, выберите вариант бюджета из кнопок ниже:",
+        "timeline": "Пожалуйста, выберите срок из кнопок ниже:",
+        "experience": "Пожалуйста, выберите рынок из кнопок ниже:",
+        "contact": (
+            "Пожалуйста, укажите корректный контакт: номер телефона "
+            "или @username в Telegram."
+        ),
+    }
+    return messages.get(field_name, f"🤔 Не совсем понял. Пожалуйста, уточните ответ для поля '{field_name}'.")
 
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 def get_lead_data(lead: Lead) -> dict[str, str]:
@@ -443,8 +545,15 @@ def trim_dialog_history(dialog: list) -> list:
         return dialog[-config.MAX_DIALOG_ENTRIES :]
     return dialog
 
-def should_use_llm(lead_data: dict[str, str], text: str) -> bool:
+def should_use_llm(
+    lead_data: dict[str, str],
+    text: str,
+    expected_field: LeadField | None = None,
+) -> bool:
     text_lower = text.lower()
+
+    if expected_field and is_answer_valid(text, expected_field.value):
+        return False
 
     if has_change_keywords(text_lower):
         return True
@@ -498,8 +607,8 @@ def message_touches_multiple_fields(text_lower: str) -> bool:
     if any(marker in text_lower for marker in timeline_markers):
         topic_count += 1
 
-    experience_markers = ["опыт", "ввоз", "первый раз", "покупал"]
-    if any(marker in text_lower for marker in experience_markers):
+    market_markers = ["сша", "европ", "коре", "китай", "рынок", "рынке"]
+    if any(marker in text_lower for marker in market_markers):
         topic_count += 1
 
     contact_markers = ["телефон", "номер", "@", "контакт"]
@@ -517,6 +626,44 @@ def is_contact_like_text(text: str) -> bool:
         return True
     cleaned_text = re.sub(r"[\s\(\)\-]", "", text)
     return bool(re.search(r"\+?\d{10,15}", cleaned_text))
+
+
+def apply_expected_field_answer(
+    lead: Lead,
+    db,
+    chat_id: str,
+    expected_field: LeadField,
+    text: str,
+) -> bool:
+    """Сохраняет ответ пользователя для текущего поля FSM."""
+    field_name = expected_field.value
+    if not is_answer_valid(text, field_name):
+        return False
+
+    value = text.strip() if field_name in {"budget", "timeline", "experience"} else clean_text(text)
+    if field_name == "budget":
+        lead.budget = value
+        clear_pending_budget_currency(db, chat_id)
+    elif field_name == "contact":
+        lead.contact = value
+        set_awaiting_manual_contact(db, chat_id, False)
+    else:
+        setattr(lead, field_name, value)
+
+    logger.info("📝 Поле %s заполнено для lead_id=%s: %s", field_name, lead.id, value)
+    return True
+
+
+def get_reply_markup_for_field(db, chat_id: str, field: LeadField):
+    if field == LeadField.CONTACT and not is_awaiting_manual_contact(db, chat_id):
+        return get_contact_keyboard()
+    if field == LeadField.BUDGET:
+        return get_budget_keyboard()
+    if field == LeadField.TIMELINE:
+        return get_timeline_keyboard()
+    if field == LeadField.EXPERIENCE:
+        return get_market_keyboard()
+    return None
 
 
 def get_pending_field_confirm(db, chat_id: str) -> dict | None:
@@ -562,6 +709,17 @@ def apply_parsed_fields(
         if not clean_value:
             continue
 
+        if field == "car" and not is_answer_valid(clean_value, "car"):
+            continue
+        if field == "budget" and clean_value not in BUDGET_OPTIONS:
+            continue
+        if field == "timeline" and clean_value not in TIMELINE_OPTIONS:
+            continue
+        if field == "experience" and clean_value not in MARKET_OPTIONS:
+            continue
+        if field == "contact" and not is_answer_valid(clean_value, "contact"):
+            continue
+
         current_value = (getattr(lead, field) or "").strip()
         if current_value and current_value != clean_value and not allow_overwrite:
             label = FIELD_LABELS.get(field, field)
@@ -594,15 +752,7 @@ async def send_current_field_prompt(
         return
 
     question = FSMService.get_question_for_field(expected_field)
-    reply_markup = None
-    if expected_field == LeadField.CONTACT and not is_awaiting_manual_contact(db, chat_id):
-        reply_markup = get_contact_keyboard()
-    elif expected_field == LeadField.BUDGET:
-        reply_markup = get_budget_keyboard()
-    elif expected_field == LeadField.TIMELINE:
-        reply_markup = get_timeline_keyboard()
-    elif expected_field == LeadField.EXPERIENCE:
-        reply_markup = get_experience_keyboard()
+    reply_markup = get_reply_markup_for_field(db, chat_id, expected_field)
 
     await send_reply(
         message,
@@ -646,25 +796,26 @@ def clean_text(text: str) -> str:
 
 def apply_budget_value(lead: Lead, chat_id: str, raw_budget: str, db) -> str | None:
     """
-    Сохраняет бюджет с валютой.
-    Возвращает текст уточняющего вопроса, если валюта не указана.
+    Сохраняет бюджет только из предустановленных вариантов кнопок.
     """
     raw_budget = clean_text(raw_budget).strip()
     if not raw_budget:
         return None
 
+    if raw_budget in BUDGET_OPTIONS:
+        lead.budget = raw_budget
+        clear_pending_budget_currency(db, chat_id)
+        return None
+
     normalized, needs_currency = normalize_budget(raw_budget)
-    if normalized:
+    if normalized and normalized in BUDGET_OPTIONS:
         lead.budget = normalized
         clear_pending_budget_currency(db, chat_id)
         return None
 
     if needs_currency:
-        set_pending_budget_currency(db, chat_id, raw_budget)
-        lead.budget = ""
-        return CURRENCY_CLARIFICATION_QUESTION
+        return None
 
-    lead.budget = raw_budget
     return None
 
 
@@ -782,17 +933,24 @@ async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) ->
         reply_markup=get_new_application_keyboard(),
     )
 
-    # Уведомление менеджеру
-    if config.MANAGER_CHAT_ID:
+    # Уведомление в группу или менеджеру
+    notification_chat_id = config.GROUP_CHAT_ID or config.MANAGER_CHAT_ID
+    if notification_chat_id:
         try:
             await bot.send_message(
-                chat_id=int(config.MANAGER_CHAT_ID),
+                chat_id=int(notification_chat_id),
                 text=format_manager_notification(lead),
                 parse_mode=ParseMode.HTML,
             )
-            logger.info("📨 Уведомление отправлено менеджеру: lead_id=%s", lead.id)
+            if config.GROUP_CHAT_ID:
+                logger.info("📨 Уведомление отправлено в группу: lead_id=%s", lead.id)
+            else:
+                logger.info("📨 Уведомление отправлено менеджеру: lead_id=%s", lead.id)
         except Exception as e:
-            logger.error("❌ Ошибка отправки уведомления менеджеру: %s", e)
+            if config.GROUP_CHAT_ID:
+                logger.error("❌ Ошибка отправки уведомления в группу: %s", e)
+            else:
+                logger.error("❌ Ошибка отправки уведомления менеджеру: %s", e)
 
     # Сохраняем в Google Sheets
     try:
@@ -816,13 +974,53 @@ async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) ->
 # === КОМАНДЫ БОТА ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await send_reply(
-        message,
-        "👋 Здравствуйте! Я AI-агент для автобизнеса.\n\n"
-        "Я помогу собрать заявку на автомобиль под пригон из-за рубежа.\n"
-        "Отвечайте на мои вопросы, и я передам данные менеджеру.\n\n"
-        "Чтобы начать заявку, отправьте /new или просто напишите сообщение.",
-    )
+    chat_id = str(message.chat.id)
+    username = message.from_user.username or "unknown"
+    db = Session()
+    try:
+        has_completed = (
+            db.query(Lead)
+            .filter(Lead.chat_id == chat_id, Lead.status == "completed")
+            .count()
+            > 0
+        )
+        if has_completed:
+            await send_reply(message, COMPLETED_LEAD_HINT)
+            return
+
+        active_lead = get_active_lead(db, chat_id)
+        if active_lead:
+            await send_reply(
+                message,
+                "У вас уже есть активная заявка. Продолжайте диалог или отправьте /cancel.",
+            )
+            return
+
+        greeting = get_start_greeting()
+        lead = Lead(
+            chat_id=chat_id,
+            username=username,
+            pending_state={GREETING_SENT_KEY: True},
+        )
+        db.add(lead)
+        db.flush()
+        dialog = [
+            {
+                "role": "assistant",
+                "text": greeting,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        ]
+        lead.dialog_history = trim_dialog_history(dialog)
+        db.commit()
+        await send_reply(message, greeting)
+        logger.info("👋 /start: создан лид lead_id=%s для chat_id=%s", lead.id, chat_id)
+    except Exception as e:
+        logger.error("❌ Ошибка команды /start: %s", e, exc_info=True)
+        await send_reply(message, "⚠️ Не удалось начать работу с ботом. Попробуйте позже.")
+        db.rollback()
+    finally:
+        db.close()
 
 
 @dp.message(Command("help"))
@@ -918,6 +1116,10 @@ async def clean_my_leads(message: types.Message):
 # === ОБРАБОТЧИК СООБЩЕНИЙ ===
 @dp.message()
 async def handle_message(message: types.Message):
+    # Игнорируем сообщения из групп (чтобы бот не отвечал)
+    if message.chat.type in ("group", "supergroup"):
+        return
+
     chat_id = str(message.chat.id)
     username = message.from_user.username or "unknown"
 
@@ -927,6 +1129,11 @@ async def handle_message(message: types.Message):
             message,
             "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
         )
+        return
+
+    # === ОТЛОЖИТЬ ОТВЕТ («позже», «потом» и т.д.) ===
+    if message.text and is_later_response(message.text.strip()):
+        await handle_postpone_request(message, chat_id)
         return
 
     # === ОБРАБОТКА КНОПКИ "ВВЕСТИ ВРУЧНУЮ" ===
@@ -954,34 +1161,12 @@ async def handle_message(message: types.Message):
         await cmd_new(message)
         return
 
-    # === ОБРАБОТКА КОНТАКТА (ОТПРАВКА НОМЕРА) ===
-    if message.contact:
-        phone = message.contact.phone_number
-        db = Session()
-        try:
-            lead = get_active_lead(db, chat_id)
-            if lead and lead.status != "completed":
-                clean_phone = clean_text(phone)
-                setattr(lead, "contact", clean_phone)
-                set_awaiting_manual_contact(db, chat_id, False)
-                db.commit()
-                logger.info(f"📱 Получен номер телефона: {clean_phone}")
-                text = clean_phone
-            else:
-                await send_reply(message, "⚠️ Произошла ошибка. Попробуйте еще раз.")
-                db.close()
-                return
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки контакта: {e}")
-            db.close()
-            return
-        finally:
-            db.close()
-    else:
-        if not message.text:
-            await send_reply(message, "Пожалуйста, отправьте текстовое сообщение.")
-            return
+    # === ПОДГОТОВКА ТЕКСТА / КОНТАКТА ===
+    shared_contact = message.contact
 
+    if shared_contact:
+        text = clean_text(shared_contact.phone_number)
+    elif message.text:
         text = message.text.strip()
         if not text:
             await send_reply(message, "Пожалуйста, отправьте текстовое сообщение.")
@@ -993,6 +1178,9 @@ async def handle_message(message: types.Message):
                 f"⚠️ Сообщение слишком длинное. Максимум {config.MAX_MESSAGE_LENGTH} символов.",
             )
             return
+    else:
+        await send_reply(message, "Пожалуйста, отправьте текстовое сообщение.")
+        return
 
     # === ЛОГИРОВАНИЕ ===
     logger.info("📩 Сообщение от chat_id=%s, длина=%s", chat_id, len(text))
@@ -1000,6 +1188,12 @@ async def handle_message(message: types.Message):
     db = Session()
 
     try:
+        lead = get_active_lead(db, chat_id)
+        if lead and is_waiting_for_user(db, chat_id):
+            clear_waiting_for_user(db, chat_id)
+            db.commit()
+            logger.info("▶️ Пользователь вернулся к диалогу: chat_id=%s", chat_id)
+
         cancel_reminder_for_chat(db, chat_id)
         db.commit()
 
@@ -1063,73 +1257,8 @@ async def handle_message(message: types.Message):
                     field_name,
                     lead.id,
                 )
-
-            else:
-                await send_currency_clarification(message)
-                return
-
-        # 4. ЕСЛИ ЕСТЬ ОЖИДАЕМОЕ ПОЛЕ — ПРОВЕРЯЕМ ОТВЕТ
-        if expected_field and expected_field.value in ["budget", "timeline", "experience", "contact"]:
-            field_name = expected_field.value
-            is_valid = is_answer_valid(text, field_name)
-
-            if (
-                field_name == "contact"
-                and is_awaiting_manual_contact(db, chat_id)
-                and text.strip()
-            ):
-                is_valid = True
-            
-            if not is_valid:
-                keyboard = None if (
-                    field_name == "contact" and is_awaiting_manual_contact(db, chat_id)
-                ) else get_keyboard_for_field(field_name)
-                if keyboard:
-                    await send_reply(
-                        message,
-                        "🤔 Не совсем понял. Пожалуйста, уточните, выбрав вариант:",
-                        reply_markup=keyboard,
-                    )
-                    logger.info(f"❓ Показаны варианты для поля {field_name}, chat_id={chat_id}")
-                    return
-                else:
-                    await send_reply(
-                        message,
-                        f"🤔 Не совсем понял. Пожалуйста, уточните ответ для поля '{field_name}'.",
-                    )
-                    return
-
-        # 5. ПАРСИНГ (если нужно)
-        # Проверяем, не является ли сообщение ТОЛЬКО приветствием
-        greeting_words = ["привет", "добрый день", "добрый вечер", "здравствуйте", "здравствуй"]
-        # Очищаем текст от пунктуации и лишних пробелов
-        cleaned_text = re.sub(r'[^\w\s]', '', text).strip().lower()
-        words = cleaned_text.split()
-        
-        # Если в сообщении ТОЛЬКО приветствие (1-2 слова) и нет других данных
-        is_pure_greeting = (
-            len(words) <= 3 and 
-            any(word in cleaned_text for word in greeting_words)
-        )
-        
-        # Если это чистое приветствие и у лида нет данных — не парсим
-        if is_pure_greeting and not any(lead_data.values()):
-            logger.info(f"👋 Обнаружено чистое приветствие, пропускаем парсинг для lead_id={lead.id}")
-            if just_sent_welcome:
-                return
-            pass
-        elif should_use_llm(lead_data, text):
-            parsed = await llm.parse_message(text)
-            budget_clarification = None
-            if parsed.get("budget"):
-                budget_clarification = apply_budget_value(lead, chat_id, parsed["budget"], db)
-                parsed["budget"] = ""
-            apply_parsed_fields(lead, parsed)
-            logger.info("🧠 LLM-парсинг выполнен для lead_id=%s", lead.id)
-            lead_data = get_lead_data(lead)
-            logger.info("📋 Данные после LLM: %s", lead_data)
-            if budget_clarification:
-
+            elif is_no_confirmation(text):
+                set_pending_field_confirm(db, chat_id, None)
                 dialog = list(lead.dialog_history or [])
                 dialog.append(
                     {
@@ -1139,14 +1268,12 @@ async def handle_message(message: types.Message):
                     }
                 )
                 lead.dialog_history = trim_dialog_history(dialog)
-                await send_currency_clarification(message)
                 await send_reply(message, "Хорошо, оставляю прежнее значение.")
                 await send_current_field_prompt(message, db, chat_id, expected_field)
                 db.commit()
                 return
             else:
                 dialog = list(lead.dialog_history or [])
-
                 dialog.append(
                     {
                         "role": "user",
@@ -1177,50 +1304,47 @@ async def handle_message(message: types.Message):
             return
 
         if not skip_field_processing:
-            # 3.1 УТОЧНЕНИЕ ВАЛЮТЫ ДЛЯ БЮДЖЕТА
-            if has_pending_budget_currency(db, chat_id):
-                if try_apply_pending_budget_currency(lead, chat_id, text, db):
-                    logger.info(
-                        "💱 Бюджет с валютой сохранён для chat_id=%s: %s",
-                        chat_id,
-                        lead.budget,
-                    )
-                else:
-                    await send_currency_clarification(message)
-                    return
-
             # 4. ЕСЛИ ЕСТЬ ОЖИДАЕМОЕ ПОЛЕ — ПРОВЕРЯЕМ ОТВЕТ
-            if expected_field and expected_field.value in ["budget", "timeline", "experience", "contact"]:
+            if (
+                not skip_field_processing
+                and expected_field
+                and expected_field.value in VALIDATED_FIELDS
+            ):
                 field_name = expected_field.value
                 is_valid = is_answer_valid(text, field_name)
-
-                if (
-                    field_name == "contact"
-                    and is_awaiting_manual_contact(db, chat_id)
-                    and text.strip()
-                ):
-                    is_valid = True
 
                 if not is_valid:
                     keyboard = None if (
                         field_name == "contact" and is_awaiting_manual_contact(db, chat_id)
                     ) else get_keyboard_for_field(field_name)
+                    message_text = get_invalid_answer_message(field_name)
                     if keyboard:
                         await send_reply(
                             message,
-                            "🤔 Не совсем понял. Пожалуйста, уточните, выбрав вариант:",
+                            message_text,
                             reply_markup=keyboard,
                         )
-                        logger.info(f"❓ Показаны варианты для поля {field_name}, chat_id={chat_id}")
-                        return
-                    else:
-                        await send_reply(
-                            message,
-                            f"🤔 Не совсем понял. Пожалуйста, уточните ответ для поля '{field_name}'.",
+                        logger.info(
+                            "❓ Показаны варианты для поля %s, chat_id=%s",
+                            field_name,
+                            chat_id,
                         )
                         return
+                    await send_reply(message, message_text)
+                    return
 
-            # 5. ПАРСИНГ (если нужно)
+            # 5. СОХРАНЕНИЕ ОТВЕТА НА ТЕКУЩИЙ ВОПРОС (без LLM)
+            field_answer_applied = False
+            if (
+                not skip_field_processing
+                and expected_field
+                and expected_field.value in VALIDATED_FIELDS
+            ):
+                field_answer_applied = apply_expected_field_answer(
+                    lead, db, chat_id, expected_field, text
+                )
+
+            # 6. ПАРСИНГ (если нужно)
             # Проверяем, не является ли сообщение ТОЛЬКО приветствием
             greeting_words = ["привет", "добрый день", "добрый вечер", "здравствуйте", "здравствуй"]
             # Очищаем текст от пунктуации и лишних пробелов
@@ -1238,15 +1362,14 @@ async def handle_message(message: types.Message):
                 logger.info(f"👋 Обнаружено чистое приветствие, пропускаем парсинг для lead_id={lead.id}")
                 if just_sent_welcome:
                     return
-            elif should_use_llm(lead_data, text):
+            elif not field_answer_applied and should_use_llm(lead_data, text, expected_field):
                 parsed, llm_success = await llm.parse_message(text)
                 if not llm_success or is_empty_parsed(parsed):
                     await send_llm_fallback_with_question(message, db, chat_id, expected_field)
                     return
 
-                budget_clarification = None
                 if parsed.get("budget"):
-                    budget_clarification = apply_budget_value(lead, chat_id, parsed["budget"], db)
+                    apply_budget_value(lead, chat_id, parsed["budget"], db)
                     parsed["budget"] = ""
 
                 confirm_request = apply_parsed_fields(
@@ -1272,69 +1395,8 @@ async def handle_message(message: types.Message):
                 logger.info("🧠 LLM-парсинг выполнен для lead_id=%s", lead.id)
                 lead_data = get_lead_data(lead)
                 logger.info("📋 Данные после LLM: %s", lead_data)
-                if budget_clarification:
-                    dialog = list(lead.dialog_history or [])
-                    dialog.append(
-                        {
-                            "role": "user",
-                            "text": text,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                    )
-                    lead.dialog_history = trim_dialog_history(dialog)
-                    await send_currency_clarification(message)
-                    dialog.append(
-                        {
-                            "role": "assistant",
-                            "text": budget_clarification,
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                    )
-                    lead.dialog_history = trim_dialog_history(dialog)
-                    db.commit()
-                    return
-            elif expected_field:
-                if expected_field.value == "budget":
-                    budget_clarification = apply_budget_value(lead, chat_id, text, db)
-                    logger.info(
-                        "📝 Поле budget обработано для lead_id=%s: %s",
-                        lead.id,
-                        lead.budget or f"ожидает валюту ({get_pending_budget_currency(db, chat_id)})",
-                    )
-                    if budget_clarification:
-                        dialog = list(lead.dialog_history or [])
-                        dialog.append(
-                            {
-                                "role": "user",
-                                "text": text,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            }
-                        )
-                        lead.dialog_history = trim_dialog_history(dialog)
-                        await send_currency_clarification(message)
-                        dialog.append(
-                            {
-                                "role": "assistant",
-                                "text": budget_clarification,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            }
-                        )
-                        lead.dialog_history = trim_dialog_history(dialog)
-                        db.commit()
-                        return
-                else:
-                    cleaned_value = clean_text(text)
-                    setattr(lead, expected_field.value, cleaned_value)
-                    if expected_field.value == "contact":
-                        set_awaiting_manual_contact(db, chat_id, False)
-                    logger.info(
-                        "📝 Поле %s заполнено напрямую для lead_id=%s: %s",
-                        expected_field.value,
-                        lead.id,
-                        cleaned_value,
-                    )
 
-        # 6. СОХРАНЕНИЕ ИСТОРИИ
+        # 7. СОХРАНЕНИЕ ИСТОРИИ
         dialog = list(lead.dialog_history or [])
         dialog.append(
             {
@@ -1345,7 +1407,7 @@ async def handle_message(message: types.Message):
         )
         lead.dialog_history = trim_dialog_history(dialog)
 
-        # 7. ОПРЕДЕЛЕНИЕ СЛЕДУЮЩЕГО ВОПРОСА
+        # 8. ОПРЕДЕЛЕНИЕ СЛЕДУЮЩЕГО ВОПРОСА
         lead_data = get_lead_data(lead)
         next_field = FSMService.get_next_field(lead_data)
 
@@ -1354,15 +1416,7 @@ async def handle_message(message: types.Message):
                 return
 
             question = FSMService.get_question_for_field(next_field)
-            reply_markup = None
-            if next_field == LeadField.CONTACT and not is_awaiting_manual_contact(db, chat_id):
-                reply_markup = get_contact_keyboard()
-            elif next_field == LeadField.BUDGET:
-                reply_markup = get_budget_keyboard()
-            elif next_field == LeadField.TIMELINE:
-                reply_markup = get_timeline_keyboard()
-            elif next_field == LeadField.EXPERIENCE:
-                reply_markup = get_experience_keyboard()
+            reply_markup = get_reply_markup_for_field(db, chat_id, next_field)
 
             await send_reply(message, question, reply_markup=reply_markup)
 

@@ -13,7 +13,7 @@ class UpdateService:
         "car": ["авто", "машина", "модель", "марка", "выбрал", "передумал авто", "хочу авто", "хочу машину"],
         "budget": ["бюджет", "цена", "стоимость", "денег", "тысяч", "миллион", "передумал бюджет"],
         "timeline": ["срок", "когда", "месяц", "недел", "день", "передумал срок"],
-        "experience": ["опыт", "ввоз", "заказывал", "покупал", "передумал опыт"],
+        "experience": ["рынок", "сша", "европ", "коре", "китай", "передумал рынок"],
         "contact": ["телефон", "номер", "контакт", "позвони", "передумал контакт"],
     }
     
@@ -65,12 +65,16 @@ class UpdateService:
             return None
             
         elif field == "experience":
-            if "да" in text_clean.lower() or "есть" in text_clean.lower():
-                return "Да, есть опыт"
-            elif "нет" in text_clean.lower() or "не" in text_clean.lower():
-                return "Нет, первый раз"
-            elif "консультация" in text_clean.lower():
-                return None
+            market_options = {
+                "сша": "США",
+                "европ": "Европа",
+                "коре": "Корея",
+                "китай": "Китай",
+            }
+            text_lower = text_clean.lower()
+            for marker, value in market_options.items():
+                if marker in text_lower:
+                    return value
             return None
             
         elif field == "contact":
