@@ -38,6 +38,7 @@ class Config:
     WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "")
 
     MANAGER_CHAT_ID = os.getenv("MANAGER_CHAT_ID")
+    GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID", "")
     
     # === OPENROUTER ===
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -78,6 +79,12 @@ def validate_config():
             int(config.MANAGER_CHAT_ID)
         except ValueError:
             raise ValueError("❌ MANAGER_CHAT_ID должен быть числом")
+
+    if config.GROUP_CHAT_ID:
+        try:
+            int(config.GROUP_CHAT_ID)
+        except ValueError:
+            raise ValueError("❌ GROUP_CHAT_ID должен быть числом")
     
     logger.info("✅ Конфигурация валидна")
     return True

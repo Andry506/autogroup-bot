@@ -16,7 +16,7 @@ CURRENCY_STRIP_PATTERN = re.compile(
 )
 
 THOUSAND_INDICATORS = re.compile(r"тыс|тысяч|\bk\b", re.IGNORECASE)
-NUMBER_PATTERN = re.compile(r"\d[\d\s,]*")
+NUMBER_PATTERN = re.compile(r"\d+(?:[\s,]\d+)*")
 
 
 def detect_currency(text: str) -> str | None:
@@ -82,6 +82,12 @@ def format_budget_with_currency(amount_text: str, currency: str) -> str:
     return f"{base} {currency}"
 
 
+def is_currency_only_answer(text: str) -> bool:
+    """Ответ состоит только из кода валюты (кнопка USD / EUR / BYN)."""
+    cleaned = re.sub(r"[\s\.\,]+", "", text.strip().lower())
+    return cleaned in {"usd", "eur", "byn", "$", "€"}
+
+
 def normalize_budget(text: str) -> tuple[str | None, bool]:
     """
     Нормализует бюджет.
@@ -89,18 +95,17 @@ def normalize_budget(text: str) -> tuple[str | None, bool]:
     Returns:
         (normalized_budget, needs_currency_clarification)
     """
-    text = expand_shorthand_thousands(text.strip())
+    text = text.strip()
     if not text:
         return None, False
 
     currency = detect_currency(text)
+    text = expand_shorthand_thousands(text)
+    if not currency:
+        currency = detect_currency(text)
 
     if currency:
         return format_budget_with_currency(text, currency), False
-
-    if is_pure_number_budget(text):
-        digits = re.sub(r"[\s,]", "", text)
-        return f"{format_number_with_spaces(digits)} USD", False
 
     if re.search(r"\d+", text):
         return None, True

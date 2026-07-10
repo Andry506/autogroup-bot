@@ -21,9 +21,9 @@ class FSMService:
     # Вопросы для каждого поля (порядок важен!)
     QUESTIONS = {
         LeadField.CAR: "🚗 Какой автомобиль Вас интересует? (Марка, модель, год)",
-        LeadField.BUDGET: "💰 Какой бюджет Вы рассматриваете? (в USD, EUR или BYN)",
+        LeadField.BUDGET: "💰 Какой бюджет Вы рассматриваете? Выберите вариант:",
         LeadField.TIMELINE: "📅 Когда планируете покупку? (1-3 мес, 3-6 мес, >6 мес)",
-        LeadField.EXPERIENCE: "📦 У вас есть опыт вождения или опыт покупки авто за рубежом?",
+        LeadField.EXPERIENCE: "🌍 Какой рынок (США, Европа, Корея или Китай) рассматриваете к покупке?",
         LeadField.CONTACT: "📱 Оставьте телефон или @telegram для связи"
     }
     
@@ -56,24 +56,23 @@ class FSMService:
         """
         # Простые проверки для каждого поля
         if field == LeadField.BUDGET:
-            # Если нет цифр — нужны варианты
-            if not any(char.isdigit() for char in text):
+            budget_options = [
+                "до 20 000 USD",
+                "20 000 - 40 000 USD",
+                "40 000 - 60 000 USD",
+                "более 60 000 USD",
+            ]
+            if text.strip() not in budget_options:
                 return True
-            # Если есть слова "сколько", "столько", "нормально" — нужны варианты
-            vague_words = ["сколько", "столько", "нормально", "хорошо", "норм"]
-            if any(word in text.lower() for word in vague_words):
-                return True
-                
+
         if field == LeadField.TIMELINE:
-            # Если нет указания на время — нужны варианты
-            time_words = ["месяц", "день", "недел", "год", "срочн", "быстр", "скоро"]
-            if not any(word in text.lower() for word in time_words):
+            timeline_options = ["1-3 месяца", "3-6 месяцев", "более 6 месяцев"]
+            if text.strip() not in timeline_options:
                 return True
-                
+
         if field == LeadField.EXPERIENCE:
-            # Если не "да", "нет", "первый" — нужны варианты
-            experience_words = ["да", "нет", "первый", "есть", "не", "опыт"]
-            if not any(word in text.lower() for word in experience_words):
+            market_options = ["США", "Европа", "Корея", "Китай"]
+            if text.strip() not in market_options:
                 return True
                 
         return False
