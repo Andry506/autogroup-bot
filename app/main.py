@@ -96,7 +96,6 @@ FIELD_LABELS = {
 }
 
 VALIDATED_FIELDS = ["car", "budget", "timeline", "experience", "contact"]
-
 BUTTON_FIELDS = frozenset({"budget", "timeline", "experience"})
 
 CAR_REJECT_PHRASES = [
@@ -1244,6 +1243,25 @@ async def handle_message(message: types.Message):
         lead_data = get_lead_data(lead)
         expected_field = FSMService.get_next_field(lead_data)
         log_fsm_state(lead, chat_id, "expected_field", expected_field=expected_field)
+
+        # После «позже» — переспрос текущего вопроса при невалидном ответе
+        if (
+            was_waiting_for_user
+            and expected_field
+            and not is_answer_valid(text, expected_field.value)
+        ):
+            dialog = list(lead.dialog_history or [])
+            dialog.append(
+                {
+                    "role": "user",
+                    "text": text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            lead.dialog_history = trim_dialog_history(dialog)
+            await send_current_field_prompt(message, db, chat_id, expected_field)
+            db.commit()
+            return
 
         # После «позже» — переспрос текущего вопроса при невалидном ответе
         if (
