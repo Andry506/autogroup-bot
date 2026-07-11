@@ -12,15 +12,18 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemo
 from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import sessionmaker
 
-from app.core.config import config, validate_config
-from app.core.budget_utils import (
-    CURRENCY_CLARIFICATION_QUESTION,
-    detect_currency,
-    format_budget_with_currency,
-    normalize_budget,
+from app.core.car_validation import (
+    car_to_db,
+    format_car_display,
+    is_car_answer_valid,
+    is_car_filled,
+    parse_car_fast,
+    parse_car_hybrid,
 )
+from app.core.config import config, validate_config
 from app.core.database import engine, Base, ensure_schema
 from app.core.llm_client import LLMClient, fallback_message, is_empty_parsed
+from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
 from app.core.telegram_utils import format_client_summary, format_manager_notification
 from app.integrations.google_sheets import GoogleSheetsClient
 from app.models.lead import Lead
@@ -71,7 +74,8 @@ reminder_service = ReminderService(bot)
 # === БАЗА ДАННЫХ ===
 Session = sessionmaker(bind=engine)
 
-PENDING_BUDGET_KEY = "budget_currency_pending"
+PENDING_FIELD_CONFIRM_KEY = "pending_field_confirm"
+WAITING_FOR_USER_KEY = "waiting_for_user"
 REMINDER_ACTIVE_KEY = "reminder_active"
 REMINDER_QUESTION_KEY = "reminder_question"
 REMINDER_DELAY_KEY = "reminder_delay_seconds"
@@ -79,9 +83,6 @@ REMINDER_MAX_KEY = "reminder_max_reminders"
 REMINDER_INTERVAL_KEY = "reminder_interval_seconds"
 REMINDER_STARTED_AT_KEY = "reminder_started_at"
 AWAITING_MANUAL_CONTACT_KEY = "awaiting_manual_contact"
-PENDING_FIELD_CONFIRM_KEY = "pending_field_confirm"
-GREETING_SENT_KEY = "greeting_sent"
-WAITING_FOR_USER_KEY = "waiting_for_user"
 
 
 CHANGE_KEYWORDS = [
@@ -102,18 +103,9 @@ FIELD_LABELS = {
     "contact": "контакт",
 }
 
-BUDGET_OPTIONS = [
-    "до 20 000 USD",
-    "20 000 - 40 000 USD",
-    "40 000 - 60 000 USD",
-    "более 60 000 USD",
-]
-
-MARKET_OPTIONS = ["США", "Европа", "Корея", "Китай"]
-
-TIMELINE_OPTIONS = ["1-3 месяца", "3-6 месяцев", "более 6 месяцев"]
-
 VALIDATED_FIELDS = ["car", "budget", "timeline", "experience", "contact"]
+
+BUTTON_FIELDS = frozenset({"budget", "timeline", "experience"})
 
 YES_CONFIRM_WORDS = ["да", "yes", "ага", "верно", "подтверждаю", "ок", "ok"]
 NO_CONFIRM_WORDS = ["нет", "no", "неа", "оставь", "отмена", "не надо"]
@@ -125,9 +117,13 @@ COMPLETED_LEAD_HINT = (
 )
 
 HELP_TEXT = (
-    "ℹ️ <b>Справка по боту</b>\n\n"
-    "Я помогаю собрать заявку на автомобиль под пригон из-за рубежа.\n"
-    "Отвечайте на вопросы по очереди — данные передадутся менеджеру.\n\n"
+    "ℹ️ <b>Справка — AutoGroup Bot</b>\n\n"
+    "Я AI-помощник компании AutoGroup. Помогаю собрать заявку на автомобиль "
+    "«мечты» и передать данные менеджеру.\n\n"
+    "<b>Как пользоваться:</b>\n"
+    "• Отвечайте на вопросы по очереди\n"
+    "• Для бюджета, срока и рынка используйте кнопки\n"
+    "• Напишите «позже», если нужно время на ответ\n\n"
     "<b>Команды:</b>\n"
     "/start — начать работу с ботом\n"
     "/new — оставить новую заявку\n"
@@ -135,14 +131,6 @@ HELP_TEXT = (
     "/help — показать эту справку"
 )
 
-
-def get_start_greeting() -> str:
-    return (
-        "Здравствуйте! Я AI-помощник компании AutoGroup!\n"
-        "Я помогу собрать заявку на автомобиль \"мечты\"!\n"
-        "Пожалуйста, отвечайте на вопросы, и я передам данные менеджеру.\n\n"
-        "Чтобы начать заявку, отправьте /new или просто напишите сообщение."
-    )
 
 def get_welcome_text() -> str:
     return (
@@ -180,26 +168,6 @@ def set_pending_state(db, chat_id: str, state: dict | None) -> None:
     if not lead:
         return
     lead.pending_state = state or {}
-
-
-def has_pending_budget_currency(db, chat_id: str) -> bool:
-    return bool(get_pending_state(db, chat_id).get(PENDING_BUDGET_KEY))
-
-
-def get_pending_budget_currency(db, chat_id: str) -> str:
-    return get_pending_state(db, chat_id).get(PENDING_BUDGET_KEY, "")
-
-
-def set_pending_budget_currency(db, chat_id: str, amount: str) -> None:
-    state = get_pending_state(db, chat_id)
-    state[PENDING_BUDGET_KEY] = amount
-    set_pending_state(db, chat_id, state)
-
-
-def clear_pending_budget_currency(db, chat_id: str) -> None:
-    state = get_pending_state(db, chat_id)
-    state.pop(PENDING_BUDGET_KEY, None)
-    set_pending_state(db, chat_id, state)
 
 
 def is_awaiting_manual_contact(db, chat_id: str) -> bool:
@@ -316,7 +284,7 @@ def build_lead_row(lead: Lead) -> dict:
     return {
         "chat_id": lead.chat_id,
         "username": lead.username,
-        "car": lead.car,
+        "car": format_car_display(lead.car),
         "budget": lead.budget,
         "timeline": lead.timeline,
         "experience": lead.experience,
@@ -441,16 +409,6 @@ def get_experience_keyboard() -> ReplyKeyboardMarkup:
     return get_market_keyboard()
 
 
-def get_currency_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="USD"), KeyboardButton(text="EUR"), KeyboardButton(text="BYN")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-
-
 def get_new_application_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -489,15 +447,10 @@ def is_answer_valid(text: str, field_name: str) -> bool:
     Проверяет, является ли ответ понятным для поля.
     Если ответ невнятный — вернет False, и бот покажет кнопки.
     """
-    text_lower = text.lower().strip()
     text_stripped = text.strip()
 
     if field_name == "car":
-        if not re.search(r"[a-zA-Zа-яА-ЯёЁ]", text):
-            return False
-        if re.fullmatch(r"[\d\s\W]+", text_stripped):
-            return False
-        return len(text_stripped) >= 2
+        return is_car_answer_valid(text_stripped)
 
     if field_name == "budget":
         return text_stripped in BUDGET_OPTIONS
@@ -523,7 +476,7 @@ def get_invalid_answer_message(field_name: str) -> str:
     messages = {
         "car": (
             "Пожалуйста, напишите марку и модель автомобиля "
-            "(например, BMW X5 или Toyota Camry)."
+            "(например, BMW X5, Тойота Камри или BYD Song)."
         ),
         "budget": "Пожалуйста, выберите вариант бюджета из кнопок ниже:",
         "timeline": "Пожалуйста, выберите срок из кнопок ниже:",
@@ -537,7 +490,14 @@ def get_invalid_answer_message(field_name: str) -> str:
 
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 def get_lead_data(lead: Lead) -> dict[str, str]:
-    return {field: (getattr(lead, field) or "").strip() for field in LEAD_FIELDS}
+    data: dict[str, str] = {}
+    for field in LEAD_FIELDS:
+        if field == "car":
+            data[field] = format_car_display(lead.car) if is_car_filled(lead.car) else ""
+        else:
+            value = getattr(lead, field) or ""
+            data[field] = value.strip() if isinstance(value, str) else str(value)
+    return data
 
 def trim_dialog_history(dialog: list) -> list:
     if len(dialog) > config.MAX_DIALOG_ENTRIES:
@@ -550,6 +510,9 @@ def should_use_llm(
     expected_field: LeadField | None = None,
 ) -> bool:
     text_lower = text.lower()
+
+    if expected_field and expected_field.value == "car":
+        return False
 
     if expected_field and is_answer_valid(text, expected_field.value):
         return False
@@ -621,10 +584,34 @@ def message_touches_multiple_fields(text_lower: str) -> bool:
 
 def is_contact_like_text(text: str) -> bool:
     """Определяет, похож ли текст на номер телефона или @username."""
+    if text.strip() in BUDGET_OPTIONS:
+        return False
     if re.search(r"@\w+", text):
         return True
     cleaned_text = re.sub(r"[\s\(\)\-]", "", text)
     return bool(re.search(r"\+?\d{10,15}", cleaned_text))
+
+
+def log_fsm_state(
+    lead: Lead,
+    chat_id: str,
+    stage: str,
+    *,
+    expected_field: LeadField | None = None,
+    next_field: LeadField | None = None,
+) -> dict[str, str]:
+    """Логирует текущее состояние FSM и возвращает lead_data."""
+    lead_data = get_lead_data(lead)
+    logger.info(
+        "🔄 FSM [%s] chat_id=%s lead_id=%s expected=%s next=%s data=%s",
+        stage,
+        chat_id,
+        lead.id,
+        expected_field.value if expected_field else None,
+        next_field.value if next_field else None,
+        lead_data,
+    )
+    return lead_data
 
 
 def apply_expected_field_answer(
@@ -639,10 +626,14 @@ def apply_expected_field_answer(
     if not is_answer_valid(text, field_name):
         return False
 
-    value = text.strip() if field_name in {"budget", "timeline", "experience"} else clean_text(text)
+    if field_name in {"budget", "timeline", "experience"}:
+        value = text.strip()
+    elif field_name == "contact":
+        value = clean_text(text)
+    else:
+        value = clean_text(text)
     if field_name == "budget":
         lead.budget = value
-        clear_pending_budget_currency(db, chat_id)
     elif field_name == "contact":
         lead.contact = value
         set_awaiting_manual_contact(db, chat_id, False)
@@ -689,7 +680,7 @@ def is_no_confirmation(text: str) -> bool:
     return any(word == text_lower or text_lower.startswith(f"{word} ") for word in NO_CONFIRM_WORDS)
 
 
-def apply_parsed_fields(
+async def apply_parsed_fields(
     lead: Lead,
     parsed: dict[str, str],
     *,
@@ -708,8 +699,11 @@ def apply_parsed_fields(
         if not clean_value:
             continue
 
-        if field == "car" and not is_answer_valid(clean_value, "car"):
-            continue
+        if field == "car":
+            car_result = await parse_car_hybrid(clean_value, llm)
+            if car_result.get("status") != "ok":
+                continue
+            clean_value = car_to_db(car_result)
         if field == "budget" and clean_value not in BUDGET_OPTIONS:
             continue
         if field == "timeline" and clean_value not in TIMELINE_OPTIONS:
@@ -719,15 +713,21 @@ def apply_parsed_fields(
         if field == "contact" and not is_answer_valid(clean_value, "contact"):
             continue
 
-        current_value = (getattr(lead, field) or "").strip()
-        if current_value and current_value != clean_value and not allow_overwrite:
+        current_raw = getattr(lead, field)
+        if field == "car":
+            current_value = format_car_display(current_raw) if is_car_filled(current_raw) else ""
+            new_value = format_car_display(clean_value)
+        else:
+            current_value = (current_raw or "").strip() if isinstance(current_raw, str) else str(current_raw or "")
+            new_value = clean_value if isinstance(clean_value, str) else str(clean_value)
+        if current_value and current_value != new_value and not allow_overwrite:
             label = FIELD_LABELS.get(field, field)
             return {
                 "field": field,
                 "old_value": current_value,
                 "new_value": clean_value,
                 "question": (
-                    f"Вы хотите изменить {label} с «{current_value}» на «{clean_value}»?\n"
+                    f"Вы хотите изменить {label} с «{current_value}» на «{new_value}»?\n"
                     "Ответьте «да» или «нет»."
                 ),
             }
@@ -792,44 +792,11 @@ def clean_text(text: str) -> str:
     return emoji_pattern.sub('', text).strip()
 
 
-def apply_budget_value(lead: Lead, chat_id: str, raw_budget: str, db) -> str | None:
-    """
-    Сохраняет бюджет только из предустановленных вариантов кнопок.
-    """
+def apply_budget_value(lead: Lead, chat_id: str, raw_budget: str, db) -> None:
+    """Сохраняет бюджет только из предустановленных вариантов кнопок."""
     raw_budget = clean_text(raw_budget).strip()
-    if not raw_budget:
-        return None
-
     if raw_budget in BUDGET_OPTIONS:
         lead.budget = raw_budget
-        clear_pending_budget_currency(db, chat_id)
-        return None
-
-    normalized, needs_currency = normalize_budget(raw_budget)
-    if normalized and normalized in BUDGET_OPTIONS:
-        lead.budget = normalized
-        clear_pending_budget_currency(db, chat_id)
-        return None
-
-    if needs_currency:
-        return None
-
-    return None
-
-
-def try_apply_pending_budget_currency(lead: Lead, chat_id: str, text: str, db) -> bool:
-    """Применяет ответ с валютой к ожидающему бюджету. True — если обработано."""
-    if not has_pending_budget_currency(db, chat_id):
-        return False
-
-    currency = detect_currency(text)
-    if not currency:
-        return False
-
-    amount = get_pending_budget_currency(db, chat_id)
-    clear_pending_budget_currency(db, chat_id)
-    lead.budget = format_budget_with_currency(amount, currency)
-    return True
 
 
 async def send_reply(message: types.Message, text: str, **kwargs) -> None:
@@ -841,14 +808,6 @@ async def send_reply(message: types.Message, text: str, **kwargs) -> None:
     except Exception as e:
         logger.error("❌ Ошибка отправки: %s", e, exc_info=True)
         raise
-
-
-async def send_currency_clarification(message: types.Message) -> None:
-    await send_reply(
-        message,
-        CURRENCY_CLARIFICATION_QUESTION,
-        reply_markup=get_currency_keyboard(),
-    )
 
 
 async def schedule_question_reminder(
@@ -994,24 +953,11 @@ async def cmd_start(message: types.Message):
             )
             return
 
-        greeting = get_start_greeting()
-        lead = Lead(
-            chat_id=chat_id,
-            username=username,
-            pending_state={GREETING_SENT_KEY: True},
-        )
+        cancel_reminder_for_chat(db, chat_id)
+        lead = Lead(chat_id=chat_id, username=username, pending_state={})
         db.add(lead)
         db.flush()
-        dialog = [
-            {
-                "role": "assistant",
-                "text": greeting,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        ]
-        lead.dialog_history = trim_dialog_history(dialog)
-        db.commit()
-        await send_reply(message, greeting)
+        await begin_lead_dialog(message, db, lead)
         logger.info("👋 /start: создан лид lead_id=%s для chat_id=%s", lead.id, chat_id)
     except Exception as e:
         logger.error("❌ Ошибка команды /start: %s", e, exc_info=True)
@@ -1186,9 +1132,11 @@ async def handle_message(message: types.Message):
     db = Session()
 
     try:
+        was_waiting_for_user = False
         lead = get_active_lead(db, chat_id)
         if lead and is_waiting_for_user(db, chat_id):
             clear_waiting_for_user(db, chat_id)
+            was_waiting_for_user = True
             db.commit()
             logger.info("▶️ Пользователь вернулся к диалогу: chat_id=%s", chat_id)
 
@@ -1219,24 +1167,32 @@ async def handle_message(message: types.Message):
             lead.username = username
 
         if is_new_lead:
-            welcome_text = get_welcome_with_car_question()
-            await send_reply(message, welcome_text)
+            await begin_lead_dialog(message, db, lead)
             just_sent_welcome = True
-            await schedule_question_reminder(db, chat_id, welcome_text)
-            dialog = list(lead.dialog_history or [])
-            dialog.append(
-                {
-                    "role": "assistant",
-                    "text": welcome_text,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            lead.dialog_history = trim_dialog_history(dialog)
-            db.commit()
 
         # 3. ПОЛУЧАЕМ ТЕКУЩИЕ ДАННЫЕ
         lead_data = get_lead_data(lead)
         expected_field = FSMService.get_next_field(lead_data)
+        log_fsm_state(lead, chat_id, "expected_field", expected_field=expected_field)
+
+        # После «позже» — переспрос текущего вопроса при невалидном ответе
+        if (
+            was_waiting_for_user
+            and expected_field
+            and not is_answer_valid(text, expected_field.value)
+        ):
+            dialog = list(lead.dialog_history or [])
+            dialog.append(
+                {
+                    "role": "user",
+                    "text": text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            lead.dialog_history = trim_dialog_history(dialog)
+            await send_current_field_prompt(message, db, chat_id, expected_field)
+            db.commit()
+            return
 
         # 3.0 ПОДТВЕРЖДЕНИЕ ИЗМЕНЕНИЯ ПОЛЯ
         skip_field_processing = False
@@ -1297,6 +1253,7 @@ async def handle_message(message: types.Message):
             expected_field
             and expected_field != LeadField.CONTACT
             and is_contact_like_text(text)
+            and not is_answer_valid(text, expected_field.value)
         ):
             await send_current_field_prompt(message, db, chat_id, expected_field)
             return
@@ -1304,13 +1261,18 @@ async def handle_message(message: types.Message):
         if not skip_field_processing:
 
             # 4. ЕСЛИ ЕСТЬ ОЖИДАЕМОЕ ПОЛЕ — ПРОВЕРЯЕМ ОТВЕТ
+            car_parse_result = None
             if (
                 not skip_field_processing
                 and expected_field
                 and expected_field.value in VALIDATED_FIELDS
             ):
                 field_name = expected_field.value
-                is_valid = is_answer_valid(text, field_name)
+                if field_name == "car":
+                    car_parse_result = await parse_car_hybrid(text, llm)
+                    is_valid = car_parse_result.get("status") == "ok"
+                else:
+                    is_valid = is_answer_valid(text, field_name)
 
                 if not is_valid:
                     keyboard = None if (
@@ -1339,9 +1301,29 @@ async def handle_message(message: types.Message):
                 and expected_field
                 and expected_field.value in VALIDATED_FIELDS
             ):
-                field_answer_applied = apply_expected_field_answer(
-                    lead, db, chat_id, expected_field, text
-                )
+                if expected_field.value == "car" and car_parse_result:
+                    if car_parse_result.get("status") == "ok":
+                        lead.car = car_to_db(car_parse_result)
+                        field_answer_applied = True
+                        logger.info(
+                            "📝 Поле car заполнено для lead_id=%s: %s",
+                            lead.id,
+                            format_car_display(lead.car),
+                        )
+                else:
+                    field_answer_applied = apply_expected_field_answer(
+                        lead, db, chat_id, expected_field, text
+                    )
+                if field_answer_applied and expected_field.value in BUTTON_FIELDS:
+                    skip_field_processing = True
+                    db.commit()
+                    lead_data = log_fsm_state(
+                        lead,
+                        chat_id,
+                        f"saved_{expected_field.value}",
+                        expected_field=expected_field,
+                        next_field=FSMService.get_next_field(get_lead_data(lead)),
+                    )
 
             # 6. ПАРСИНГ (если нужно)
             # Проверяем, не является ли сообщение ТОЛЬКО приветствием
@@ -1361,7 +1343,7 @@ async def handle_message(message: types.Message):
                 logger.info(f"👋 Обнаружено чистое приветствие, пропускаем парсинг для lead_id={lead.id}")
                 if just_sent_welcome:
                     return
-            elif not field_answer_applied and should_use_llm(lead_data, text, expected_field):
+            elif not field_answer_applied and not was_waiting_for_user and should_use_llm(lead_data, text, expected_field):
                 parsed, llm_success = await llm.parse_message(text)
                 if not llm_success or is_empty_parsed(parsed):
                     await send_llm_fallback_with_question(message, db, chat_id, expected_field)
@@ -1371,7 +1353,7 @@ async def handle_message(message: types.Message):
                     apply_budget_value(lead, chat_id, parsed["budget"], db)
                     parsed["budget"] = ""
 
-                confirm_request = apply_parsed_fields(
+                confirm_request = await apply_parsed_fields(
                     lead,
                     parsed,
                     allow_overwrite=has_change_keywords(text.lower()),
@@ -1409,6 +1391,13 @@ async def handle_message(message: types.Message):
         # 8. ОПРЕДЕЛЕНИЕ СЛЕДУЮЩЕГО ВОПРОСА
         lead_data = get_lead_data(lead)
         next_field = FSMService.get_next_field(lead_data)
+        log_fsm_state(
+            lead,
+            chat_id,
+            "next_field",
+            expected_field=expected_field,
+            next_field=next_field,
+        )
 
         if next_field:
             if just_sent_welcome and next_field == LeadField.CAR:
@@ -1472,18 +1461,33 @@ async def on_startup():
     finally:
         db.close()
 
-    if config.WEBHOOK_SECRET_TOKEN:
-        logger.info(
-            "🔐 WEBHOOK_SECRET_TOKEN задан. Установите webhook с параметром secret_token: "
-            "https://api.telegram.org/bot<TOKEN>/setWebhook?url=%s&secret_token=<WEBHOOK_SECRET_TOKEN>",
-            config.WEBHOOK_URL,
-        )
-    else:
+    if not config.WEBHOOK_SECRET_TOKEN:
         logger.warning(
             "⚠️ WEBHOOK_SECRET_TOKEN не задан. Эндпоинт /webhook/telegram принимает запросы без проверки."
         )
 
-    logger.info("⏳ Webhook не установлен автоматически, установи вручную через браузер")
+    try:
+        await bot.set_webhook(
+            url=config.WEBHOOK_URL,
+            secret_token=config.WEBHOOK_SECRET_TOKEN or None,
+            drop_pending_updates=True,
+        )
+        logger.info("🔗 Webhook установлен: %s", config.WEBHOOK_URL)
+    except Exception as e:
+        logger.error("❌ Ошибка установки webhook: %s", e, exc_info=True)
+    else:
+        try:
+            webhook_info = await bot.get_webhook_info()
+            if webhook_info.url == config.WEBHOOK_URL:
+                logger.info("✅ Webhook успешно установлен и проверен")
+            else:
+                logger.warning(
+                    "⚠️ Webhook не соответствует ожидаемому URL: %s (ожидался %s)",
+                    webhook_info.url,
+                    config.WEBHOOK_URL,
+                )
+        except Exception as e:
+            logger.error("❌ Ошибка проверки webhook: %s", e, exc_info=True)
 
 @app.on_event("shutdown")
 async def on_shutdown():

@@ -1,5 +1,6 @@
 import html
 
+from app.core.car_validation import format_car_display
 from app.models.lead import Lead
 
 
@@ -11,7 +12,7 @@ def format_client_summary(lead: Lead) -> str:
     return (
         "✅ <b>Спасибо! Заявка принята!</b>\n\n"
         "📋 <b>Ваши данные:</b>\n"
-        f"🚗 <b>Авто:</b> {escape_html(lead.car)}\n"
+        f"🚗 <b>Авто:</b> {escape_html(format_car_display(lead.car))}\n"
         f"💰 <b>Бюджет:</b> {escape_html(lead.budget)}\n"
         f"📅 <b>Срок:</b> {escape_html(lead.timeline)}\n"
         f"🌍 <b>Рынок:</b> {escape_html(lead.experience)}\n"
@@ -25,7 +26,7 @@ def format_manager_notification(lead: Lead) -> str:
     return (
         "НОВАЯ ЗАЯВКА!\n\n"
         "Данные клиента:\n"
-        f"Авто: {lead.car}\n"
+        f"Авто: {format_car_display(lead.car)}\n"
         f"Бюджет: {lead.budget}\n"
         f"Срок: {lead.timeline}\n"
         f"Рынок: {lead.experience}\n"

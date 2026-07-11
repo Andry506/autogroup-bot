@@ -4,6 +4,7 @@ import logging
 import re
 
 from app.core.config import config
+from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -15,11 +16,19 @@ EMPTY_PARSED = {
     "contact": "",
 }
 
+EMPTY_CAR_EXTRACTED = {
+    "brand": "",
+    "model": "",
+    "year": "",
+    "generation": "",
+    "confidence": 0.0,
+}
+
 
 def fallback_message() -> str:
     return (
-        'Не удалось обработать ваш ответ. Пожалуйста, напишите проще, '
-        'например: "BMW X5" или "бюджет 30 000 USD".'
+        "Не удалось обработать ваш ответ. Пожалуйста, ответьте на текущий вопрос "
+        "или напишите проще, например: «BMW X5»."
     )
 
 
@@ -44,22 +53,25 @@ class LLMClient:
         """
         text = text[: config.MAX_MESSAGE_LENGTH]
 
+        budget_options = ", ".join(f'"{o}"' for o in BUDGET_OPTIONS)
+        timeline_options = ", ".join(f'"{o}"' for o in TIMELINE_OPTIONS)
+        market_options = ", ".join(f'"{o}"' for o in MARKET_OPTIONS)
+
         prompt = f"""Извлеки данные из сообщения клиента для автобизнеса.
 
 Поля:
-- car: марка и модель автомобиля
-- budget: бюджет с валютой (USD, EUR или BYN). Если валюта не указана, верни только сумму
-- timeline: срок покупки
-- experience: рынок покупки (США, Европа, Корея или Китай)
-- contact: телефон или Telegram
+- car: марка и модель автомобиля (не приветствие и не вежливые фразы)
+- budget: только один из вариантов: {budget_options}
+- timeline: только один из вариантов: {timeline_options}
+- experience: рынок покупки — только один из: {market_options}
+- contact: телефон или @username в Telegram
 
 Правила:
 1. Если поле не найдено, верни пустую строку.
 2. Ответь ТОЛЬКО JSON без пояснений.
 3. Не добавляй лишних полей.
-4. Для budget указывай валюту (USD, EUR или BYN), если она есть в сообщении.
-5. Если пользователь указал только число без валюты, верни только число.
-6. Короткие числа в budget (например, 20, 40) означают тысячи: 20 = 20 000.
+4. Для budget, timeline и experience используй ТОЛЬКО значения из списков выше.
+5. Не извлекай приветствия («добрый день») как car.
 
 Сообщение клиента:
 {text}"""
@@ -95,6 +107,85 @@ class LLMClient:
         except Exception as e:
             logger.error("Ошибка LLM: %s", e)
             return EMPTY_PARSED.copy(), False
+
+    async def extract_car(self, text: str) -> tuple[dict, bool]:
+        """Извлекает марку, модель, год и поколение автомобиля из текста."""
+        text = text[: config.MAX_MESSAGE_LENGTH]
+        prompt = f"""Извлеки из сообщения клиента данные об автомобиле.
+
+Верни ТОЛЬКО JSON:
+{{
+  "brand": "каноническая марка латиницей, например BMW, Toyota, Geely",
+  "model": "модель без марки, например X5, Camry, Galaxy Starship 7",
+  "year": "год выпуска или пустая строка",
+  "generation": "поколение, например G05, или пустая строка",
+  "confidence": 0.0
+}}
+
+Правила:
+1. Не извлекай приветствия, цвета, общие слова («красная машина», «хороший автомобиль»).
+2. Если это не автомобиль — верни пустые brand и model.
+3. Марку пиши латиницей в общепринятом виде.
+4. Модель может быть новой и отсутствовать в справочниках.
+5. confidence от 0.0 до 1.0.
+
+Сообщение:
+{text}"""
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    self.base_url,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "Ты извлекаешь марку и модель автомобиля. Отвечай только JSON.",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 200,
+                        "response_format": {"type": "json_object"},
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                result = self._parse_car_json(content)
+                if not result.get("brand") and not result.get("model"):
+                    return EMPTY_CAR_EXTRACTED.copy(), False
+                return result, True
+        except Exception as e:
+            logger.error("Ошибка LLM extract_car: %s", e)
+            return EMPTY_CAR_EXTRACTED.copy(), False
+
+    def _parse_car_json(self, content: str) -> dict:
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError:
+            json_match = re.search(r"\{.*\}", content, re.DOTALL)
+            if not json_match:
+                return EMPTY_CAR_EXTRACTED.copy()
+            try:
+                result = json.loads(json_match.group())
+            except json.JSONDecodeError:
+                return EMPTY_CAR_EXTRACTED.copy()
+
+        parsed = EMPTY_CAR_EXTRACTED.copy()
+        for field in ("brand", "model", "year", "generation"):
+            value = result.get(field, "")
+            parsed[field] = str(value).strip() if value else ""
+        try:
+            parsed["confidence"] = float(result.get("confidence", 0.7) or 0.7)
+        except (TypeError, ValueError):
+            parsed["confidence"] = 0.7
+        return parsed
 
     def _parse_json_content(self, content: str) -> dict:
         try:

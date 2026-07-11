@@ -15,7 +15,7 @@ class Lead(Base):
     username = Column(String(255))  # Username в Telegram
     
     # Собираемые поля (заполняются постепенно)
-    car = Column(String(255), default="")  # Марка/модель авто
+    car = Column(JSON, default=lambda: {})  # {brand, model, year, generation}
     budget = Column(String(100), default="")  # Бюджет
     timeline = Column(String(100), default="")  # Срок покупки
     experience = Column(String(50), default="")  # Опыт ввоза
