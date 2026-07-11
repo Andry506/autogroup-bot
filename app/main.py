@@ -13,14 +13,9 @@ from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import config, validate_config
-from app.core.budget_utils import (
-    CURRENCY_CLARIFICATION_QUESTION,
-    detect_currency,
-    format_budget_with_currency,
-    normalize_budget,
-)
 from app.core.database import engine, Base, ensure_schema
 from app.core.llm_client import LLMClient, fallback_message, is_empty_parsed
+from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
 from app.core.telegram_utils import format_client_summary, format_manager_notification
 from app.integrations.google_sheets import GoogleSheetsClient
 from app.models.lead import Lead
@@ -71,7 +66,9 @@ reminder_service = ReminderService(bot)
 # === БАЗА ДАННЫХ ===
 Session = sessionmaker(bind=engine)
 
-PENDING_BUDGET_KEY = "budget_currency_pending"
+PENDING_FIELD_CONFIRM_KEY = "pending_field_confirm"
+GREETING_SENT_KEY = "greeting_sent"
+WAITING_FOR_USER_KEY = "waiting_for_user"
 REMINDER_ACTIVE_KEY = "reminder_active"
 REMINDER_QUESTION_KEY = "reminder_question"
 REMINDER_DELAY_KEY = "reminder_delay_seconds"
@@ -79,9 +76,6 @@ REMINDER_MAX_KEY = "reminder_max_reminders"
 REMINDER_INTERVAL_KEY = "reminder_interval_seconds"
 REMINDER_STARTED_AT_KEY = "reminder_started_at"
 AWAITING_MANUAL_CONTACT_KEY = "awaiting_manual_contact"
-PENDING_FIELD_CONFIRM_KEY = "pending_field_confirm"
-GREETING_SENT_KEY = "greeting_sent"
-WAITING_FOR_USER_KEY = "waiting_for_user"
 
 
 CHANGE_KEYWORDS = [
@@ -102,18 +96,52 @@ FIELD_LABELS = {
     "contact": "контакт",
 }
 
-BUDGET_OPTIONS = [
-    "до 20 000 USD",
-    "20 000 - 40 000 USD",
-    "40 000 - 60 000 USD",
-    "более 60 000 USD",
+VALIDATED_FIELDS = ["car", "budget", "timeline", "experience", "contact"]
+
+CAR_REJECT_PHRASES = [
+    "не знаю",
+    "хочу авто",
+    "хочу машину",
+    "пока не знаю",
+    "не выбрал",
+    "не определился",
+    "не решил",
 ]
 
-MARKET_OPTIONS = ["США", "Европа", "Корея", "Китай"]
+CAR_REJECT_EXACT = {
+    "да", "нет", "yes", "no", "ok", "ок", "ага", "угу", "спасибо", "благодарю",
+    "привет", "здравствуйте", "здравствуй", "добрый день", "добрый вечер",
+    "доброе утро", "доброй ночи", "хорошо", "норм", "нормально", "готов",
+    "продолжим", "понятно", "ясно", "хорошо", "отлично", "супер", "класс",
+    "позже", "потом", "не знаю", "хз", "не помню", "зависит", "может быть",
+    "хочу авто", "пока не знаю", "не выбрал", "не определился", "не решил",
+    "хочу машину",
+}
 
-TIMELINE_OPTIONS = ["1-3 месяца", "3-6 месяцев", "более 6 месяцев"]
+CAR_REJECT_WORDS = {
+    "да", "нет", "ok", "ок", "ага", "угу", "спасибо", "благодарю", "привет",
+    "здравствуйте", "здравствуй", "добрый", "доброе", "доброй", "день", "утро",
+    "вечер", "ночи", "хорошо", "норм", "нормально", "готов", "продолжим",
+    "понятно", "ясно", "отлично", "супер", "класс", "позже", "потом",
+    "знаю", "выбрал", "определился", "решил", "машину", "машина", "авто",
+}
 
-VALIDATED_FIELDS = ["car", "budget", "timeline", "experience", "contact"]
+CAR_KNOWN_BRANDS = {
+    "bmw", "audi", "mercedes", "mercedes-benz", "toyota", "lexus", "honda",
+    "mazda", "nissan", "infiniti", "volkswagen", "vw", "ford", "chevrolet",
+    "kia", "hyundai", "porsche", "volvo", "subaru", "mitsubishi", "jaguar",
+    "landrover", "land rover", "rangerover", "range rover", "skoda", "renault",
+    "peugeot", "citroen", "citroën", "opel", "fiat", "jeep", "tesla", "geely",
+    "chery", "haval", "byd", "lada", "ваз", "газ", "уаз", "москвич", "belgee",
+    "changan", "exeed", "omoda", "jetour", "cadillac", "lincoln", "dodge",
+    "chrysler", "buick", "gmc", "acura", "genesis", "ssangyong", "seat",
+    "mini", "bentley", "rolls-royce", "rollsroyce", "ferrari", "lamborghini",
+    "maserati", "alfa", "alfaromeo", "alfa romeo", "dacia", "great wall",
+    "dongfeng", "faw", "lifan", "zotye", "ravon", "daewoo", "saab", "smart",
+    "pontiac", "hummer", "isuzu", "suzuki", "datsun", "proton", "tata",
+    "mahindra", "rover", "mg", "cupra", "lynk", "co", "voyah", "zeekr",
+    "nio", "xpeng", "li", "lixiang", "tank", "gwm", "jac", "foton", "baic",
+}
 
 YES_CONFIRM_WORDS = ["да", "yes", "ага", "верно", "подтверждаю", "ок", "ok"]
 NO_CONFIRM_WORDS = ["нет", "no", "неа", "оставь", "отмена", "не надо"]
@@ -125,9 +153,13 @@ COMPLETED_LEAD_HINT = (
 )
 
 HELP_TEXT = (
-    "ℹ️ <b>Справка по боту</b>\n\n"
-    "Я помогаю собрать заявку на автомобиль под пригон из-за рубежа.\n"
-    "Отвечайте на вопросы по очереди — данные передадутся менеджеру.\n\n"
+    "ℹ️ <b>Справка — AutoGroup Bot</b>\n\n"
+    "Я AI-помощник компании AutoGroup. Помогаю собрать заявку на автомобиль "
+    "«мечты» и передать данные менеджеру.\n\n"
+    "<b>Как пользоваться:</b>\n"
+    "• Отвечайте на вопросы по очереди\n"
+    "• Для бюджета, срока и рынка используйте кнопки\n"
+    "• Напишите «позже», если нужно время на ответ\n\n"
     "<b>Команды:</b>\n"
     "/start — начать работу с ботом\n"
     "/new — оставить новую заявку\n"
@@ -180,26 +212,6 @@ def set_pending_state(db, chat_id: str, state: dict | None) -> None:
     if not lead:
         return
     lead.pending_state = state or {}
-
-
-def has_pending_budget_currency(db, chat_id: str) -> bool:
-    return bool(get_pending_state(db, chat_id).get(PENDING_BUDGET_KEY))
-
-
-def get_pending_budget_currency(db, chat_id: str) -> str:
-    return get_pending_state(db, chat_id).get(PENDING_BUDGET_KEY, "")
-
-
-def set_pending_budget_currency(db, chat_id: str, amount: str) -> None:
-    state = get_pending_state(db, chat_id)
-    state[PENDING_BUDGET_KEY] = amount
-    set_pending_state(db, chat_id, state)
-
-
-def clear_pending_budget_currency(db, chat_id: str) -> None:
-    state = get_pending_state(db, chat_id)
-    state.pop(PENDING_BUDGET_KEY, None)
-    set_pending_state(db, chat_id, state)
 
 
 def is_awaiting_manual_contact(db, chat_id: str) -> bool:
@@ -441,16 +453,6 @@ def get_experience_keyboard() -> ReplyKeyboardMarkup:
     return get_market_keyboard()
 
 
-def get_currency_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="USD"), KeyboardButton(text="EUR"), KeyboardButton(text="BYN")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-
-
 def get_new_application_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -484,20 +486,69 @@ def get_keyboard_for_field(field_name: str):
     return keyboards.get(field_name)
 
 # === ПРОВЕРКА ОТВЕТА (ПОНЯТНЫЙ / НЕ ПОНЯТНЫЙ) ===
+def normalize_car_text(text: str) -> str:
+    normalized = re.sub(r"[^\w\s\-]", " ", text.lower())
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def is_known_car_brand(word: str) -> bool:
+    return word.lower().strip() in CAR_KNOWN_BRANDS
+
+
+def is_car_answer_valid(text: str) -> bool:
+    """
+    Проверяет, похож ли ответ на марку/модель автомобиля.
+    Допускается: «BMW X5» (2+ слова) или одно слово — известная марка («BMW»).
+    Отклоняются: приветствия, вежливые слова, «да», «ок» и т.п.
+    """
+    text_stripped = text.strip()
+    if len(text_stripped) < 2:
+        return False
+
+    if not re.search(r"[a-zA-Zа-яА-ЯёЁ]", text_stripped):
+        return False
+    if re.fullmatch(r"[\d\s\W]+", text_stripped):
+        return False
+
+    normalized = normalize_car_text(text_stripped)
+    if not normalized:
+        return False
+
+    if normalized in CAR_REJECT_EXACT:
+        return False
+
+    for phrase in CAR_REJECT_PHRASES:
+        if phrase in normalized:
+            return False
+
+    words = normalized.split()
+    if all(word in CAR_REJECT_WORDS for word in words):
+        return False
+
+    if len(words) >= 2 and words[0] in {"добрый", "доброе", "доброй"}:
+        if words[1] in {"день", "утро", "вечер", "ночи"}:
+            return False
+
+    if len(words) == 1:
+        return is_known_car_brand(words[0])
+
+    if len(words) >= 2:
+        if words[0] in CAR_REJECT_WORDS:
+            return False
+        return True
+
+    return False
+
+
 def is_answer_valid(text: str, field_name: str) -> bool:
     """
     Проверяет, является ли ответ понятным для поля.
     Если ответ невнятный — вернет False, и бот покажет кнопки.
     """
-    text_lower = text.lower().strip()
     text_stripped = text.strip()
 
     if field_name == "car":
-        if not re.search(r"[a-zA-Zа-яА-ЯёЁ]", text):
-            return False
-        if re.fullmatch(r"[\d\s\W]+", text_stripped):
-            return False
-        return len(text_stripped) >= 2
+        return is_car_answer_valid(text_stripped)
 
     if field_name == "budget":
         return text_stripped in BUDGET_OPTIONS
@@ -550,6 +601,9 @@ def should_use_llm(
     expected_field: LeadField | None = None,
 ) -> bool:
     text_lower = text.lower()
+
+    if expected_field and expected_field.value == "car" and not is_car_answer_valid(text):
+        return False
 
     if expected_field and is_answer_valid(text, expected_field.value):
         return False
@@ -642,7 +696,6 @@ def apply_expected_field_answer(
     value = text.strip() if field_name in {"budget", "timeline", "experience"} else clean_text(text)
     if field_name == "budget":
         lead.budget = value
-        clear_pending_budget_currency(db, chat_id)
     elif field_name == "contact":
         lead.contact = value
         set_awaiting_manual_contact(db, chat_id, False)
@@ -708,7 +761,7 @@ def apply_parsed_fields(
         if not clean_value:
             continue
 
-        if field == "car" and not is_answer_valid(clean_value, "car"):
+        if field == "car" and not is_car_answer_valid(clean_value):
             continue
         if field == "budget" and clean_value not in BUDGET_OPTIONS:
             continue
@@ -792,44 +845,11 @@ def clean_text(text: str) -> str:
     return emoji_pattern.sub('', text).strip()
 
 
-def apply_budget_value(lead: Lead, chat_id: str, raw_budget: str, db) -> str | None:
-    """
-    Сохраняет бюджет только из предустановленных вариантов кнопок.
-    """
+def apply_budget_value(lead: Lead, chat_id: str, raw_budget: str, db) -> None:
+    """Сохраняет бюджет только из предустановленных вариантов кнопок."""
     raw_budget = clean_text(raw_budget).strip()
-    if not raw_budget:
-        return None
-
     if raw_budget in BUDGET_OPTIONS:
         lead.budget = raw_budget
-        clear_pending_budget_currency(db, chat_id)
-        return None
-
-    normalized, needs_currency = normalize_budget(raw_budget)
-    if normalized and normalized in BUDGET_OPTIONS:
-        lead.budget = normalized
-        clear_pending_budget_currency(db, chat_id)
-        return None
-
-    if needs_currency:
-        return None
-
-    return None
-
-
-def try_apply_pending_budget_currency(lead: Lead, chat_id: str, text: str, db) -> bool:
-    """Применяет ответ с валютой к ожидающему бюджету. True — если обработано."""
-    if not has_pending_budget_currency(db, chat_id):
-        return False
-
-    currency = detect_currency(text)
-    if not currency:
-        return False
-
-    amount = get_pending_budget_currency(db, chat_id)
-    clear_pending_budget_currency(db, chat_id)
-    lead.budget = format_budget_with_currency(amount, currency)
-    return True
 
 
 async def send_reply(message: types.Message, text: str, **kwargs) -> None:
@@ -841,14 +861,6 @@ async def send_reply(message: types.Message, text: str, **kwargs) -> None:
     except Exception as e:
         logger.error("❌ Ошибка отправки: %s", e, exc_info=True)
         raise
-
-
-async def send_currency_clarification(message: types.Message) -> None:
-    await send_reply(
-        message,
-        CURRENCY_CLARIFICATION_QUESTION,
-        reply_markup=get_currency_keyboard(),
-    )
 
 
 async def schedule_question_reminder(
@@ -1012,6 +1024,8 @@ async def cmd_start(message: types.Message):
         lead.dialog_history = trim_dialog_history(dialog)
         db.commit()
         await send_reply(message, greeting)
+        car_question = FSMService.get_question_for_field(LeadField.CAR)
+        await schedule_question_reminder(db, chat_id, car_question)
         logger.info("👋 /start: создан лид lead_id=%s для chat_id=%s", lead.id, chat_id)
     except Exception as e:
         logger.error("❌ Ошибка команды /start: %s", e, exc_info=True)
@@ -1186,9 +1200,11 @@ async def handle_message(message: types.Message):
     db = Session()
 
     try:
+        was_waiting_for_user = False
         lead = get_active_lead(db, chat_id)
         if lead and is_waiting_for_user(db, chat_id):
             clear_waiting_for_user(db, chat_id)
+            was_waiting_for_user = True
             db.commit()
             logger.info("▶️ Пользователь вернулся к диалогу: chat_id=%s", chat_id)
 
@@ -1237,6 +1253,25 @@ async def handle_message(message: types.Message):
         # 3. ПОЛУЧАЕМ ТЕКУЩИЕ ДАННЫЕ
         lead_data = get_lead_data(lead)
         expected_field = FSMService.get_next_field(lead_data)
+
+        # После «позже» — переспрос текущего вопроса при невалидном ответе
+        if (
+            was_waiting_for_user
+            and expected_field
+            and not is_answer_valid(text, expected_field.value)
+        ):
+            dialog = list(lead.dialog_history or [])
+            dialog.append(
+                {
+                    "role": "user",
+                    "text": text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            lead.dialog_history = trim_dialog_history(dialog)
+            await send_current_field_prompt(message, db, chat_id, expected_field)
+            db.commit()
+            return
 
         # 3.0 ПОДТВЕРЖДЕНИЕ ИЗМЕНЕНИЯ ПОЛЯ
         skip_field_processing = False
@@ -1361,7 +1396,7 @@ async def handle_message(message: types.Message):
                 logger.info(f"👋 Обнаружено чистое приветствие, пропускаем парсинг для lead_id={lead.id}")
                 if just_sent_welcome:
                     return
-            elif not field_answer_applied and should_use_llm(lead_data, text, expected_field):
+            elif not field_answer_applied and not was_waiting_for_user and should_use_llm(lead_data, text, expected_field):
                 parsed, llm_success = await llm.parse_message(text)
                 if not llm_success or is_empty_parsed(parsed):
                     await send_llm_fallback_with_question(message, db, chat_id, expected_field)

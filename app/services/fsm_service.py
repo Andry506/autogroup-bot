@@ -1,6 +1,9 @@
 from enum import Enum
 from typing import Optional
 
+from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
+
+
 class LeadField(Enum):
     """Список полей, которые нужно собрать у клиента (по порядку)"""
     CAR = "car"
@@ -34,10 +37,9 @@ class FSMService:
         Возвращает None, если все поля заполнены.
         """
         for field in LeadField:
-            # Если поле пустое или отсутствует — запрашиваем его
             if not lead_data.get(field.value, ""):
                 return field
-        return None  # Все поля заполнены
+        return None
     
     @staticmethod
     def get_question_for_field(field: LeadField) -> str:
@@ -48,31 +50,3 @@ class FSMService:
     def is_completed(lead_data: dict) -> bool:
         """Проверяет, заполнены ли все поля"""
         return all(lead_data.get(field.value, "") for field in LeadField)
-    
-    @staticmethod
-    def needs_clarification(text: str, field: LeadField) -> bool:
-        """
-        Проверяет, нужно ли показать варианты ответа.
-        """
-        # Простые проверки для каждого поля
-        if field == LeadField.BUDGET:
-            budget_options = [
-                "до 20 000 USD",
-                "20 000 - 40 000 USD",
-                "40 000 - 60 000 USD",
-                "более 60 000 USD",
-            ]
-            if text.strip() not in budget_options:
-                return True
-
-        if field == LeadField.TIMELINE:
-            timeline_options = ["1-3 месяца", "3-6 месяцев", "более 6 месяцев"]
-            if text.strip() not in timeline_options:
-                return True
-
-        if field == LeadField.EXPERIENCE:
-            market_options = ["США", "Европа", "Корея", "Китай"]
-            if text.strip() not in market_options:
-                return True
-                
-        return False

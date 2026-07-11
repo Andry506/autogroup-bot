@@ -4,6 +4,7 @@ import logging
 import re
 
 from app.core.config import config
+from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,8 @@ EMPTY_PARSED = {
 
 def fallback_message() -> str:
     return (
-        'Не удалось обработать ваш ответ. Пожалуйста, напишите проще, '
-        'например: "BMW X5" или "бюджет 30 000 USD".'
+        "Не удалось обработать ваш ответ. Пожалуйста, ответьте на текущий вопрос "
+        "или напишите проще, например: «BMW X5»."
     )
 
 
@@ -44,22 +45,25 @@ class LLMClient:
         """
         text = text[: config.MAX_MESSAGE_LENGTH]
 
+        budget_options = ", ".join(f'"{o}"' for o in BUDGET_OPTIONS)
+        timeline_options = ", ".join(f'"{o}"' for o in TIMELINE_OPTIONS)
+        market_options = ", ".join(f'"{o}"' for o in MARKET_OPTIONS)
+
         prompt = f"""Извлеки данные из сообщения клиента для автобизнеса.
 
 Поля:
-- car: марка и модель автомобиля
-- budget: бюджет с валютой (USD, EUR или BYN). Если валюта не указана, верни только сумму
-- timeline: срок покупки
-- experience: рынок покупки (США, Европа, Корея или Китай)
-- contact: телефон или Telegram
+- car: марка и модель автомобиля (не приветствие и не вежливые фразы)
+- budget: только один из вариантов: {budget_options}
+- timeline: только один из вариантов: {timeline_options}
+- experience: рынок покупки — только один из: {market_options}
+- contact: телефон или @username в Telegram
 
 Правила:
 1. Если поле не найдено, верни пустую строку.
 2. Ответь ТОЛЬКО JSON без пояснений.
 3. Не добавляй лишних полей.
-4. Для budget указывай валюту (USD, EUR или BYN), если она есть в сообщении.
-5. Если пользователь указал только число без валюты, верни только число.
-6. Короткие числа в budget (например, 20, 40) означают тысячи: 20 = 20 000.
+4. Для budget, timeline и experience используй ТОЛЬКО значения из списков выше.
+5. Не извлекай приветствия («добрый день») как car.
 
 Сообщение клиента:
 {text}"""
