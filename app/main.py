@@ -11,7 +11,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import sessionmaker
-
 from app.core.car_validation import (
     car_to_db,
     format_car_display,
@@ -104,7 +103,6 @@ FIELD_LABELS = {
 }
 
 VALIDATED_FIELDS = ["car", "budget", "timeline", "experience", "contact"]
-
 BUTTON_FIELDS = frozenset({"budget", "timeline", "experience"})
 
 YES_CONFIRM_WORDS = ["да", "yes", "ага", "верно", "подтверждаю", "ок", "ok"]
@@ -442,6 +440,60 @@ def get_keyboard_for_field(field_name: str):
     return keyboards.get(field_name)
 
 # === ПРОВЕРКА ОТВЕТА (ПОНЯТНЫЙ / НЕ ПОНЯТНЫЙ) ===
+def normalize_car_text(text: str) -> str:
+    normalized = re.sub(r"[^\w\s\-]", " ", text.lower())
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def is_known_car_brand(word: str) -> bool:
+    return word.lower().strip() in CAR_KNOWN_BRANDS
+
+
+def is_car_answer_valid(text: str) -> bool:
+    """
+    Проверяет, похож ли ответ на марку/модель автомобиля.
+    Допускается: «BMW X5» (2+ слова) или одно слово — известная марка («BMW»).
+    Отклоняются: приветствия, вежливые слова, «да», «ок» и т.п.
+    """
+    text_stripped = text.strip()
+    if len(text_stripped) < 2:
+        return False
+
+    if not re.search(r"[a-zA-Zа-яА-ЯёЁ]", text_stripped):
+        return False
+    if re.fullmatch(r"[\d\s\W]+", text_stripped):
+        return False
+
+    normalized = normalize_car_text(text_stripped)
+    if not normalized:
+        return False
+
+    if normalized in CAR_REJECT_EXACT:
+        return False
+
+    for phrase in CAR_REJECT_PHRASES:
+        if phrase in normalized:
+            return False
+
+    words = normalized.split()
+    if all(word in CAR_REJECT_WORDS for word in words):
+        return False
+
+    if len(words) >= 2 and words[0] in {"добрый", "доброе", "доброй"}:
+        if words[1] in {"день", "утро", "вечер", "ночи"}:
+            return False
+
+    if len(words) == 1:
+        return is_known_car_brand(words[0])
+
+    if len(words) >= 2:
+        if words[0] in CAR_REJECT_WORDS:
+            return False
+        return True
+
+    return False
+
+
 def is_answer_valid(text: str, field_name: str) -> bool:
     """
     Проверяет, является ли ответ понятным для поля.
@@ -512,6 +564,7 @@ def should_use_llm(
     text_lower = text.lower()
 
     if expected_field and expected_field.value == "car":
+
         return False
 
     if expected_field and is_answer_valid(text, expected_field.value):
@@ -698,7 +751,6 @@ async def apply_parsed_fields(
         clean_value = clean_text(value)
         if not clean_value:
             continue
-
         if field == "car":
             car_result = await parse_car_hybrid(clean_value, llm)
             if car_result.get("status") != "ok":
