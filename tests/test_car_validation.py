@@ -23,7 +23,8 @@ class CarValidationAcceptTests(unittest.TestCase):
         ("BYD Sealion 7", "BYD", "Sealion 7"),
         ("тойота равчик", "Toyota", "RAV4"),
         ("geely монжаро", "Geely", "Monjaro"),
-        ("BMW iX", "BMW", "iX"),
+        ("Добрый день. Audi RS6", "Audi", "RS6"),
+        ("Mersedes S63", "Mercedes", "S63"),
     ]
 
     def test_parse_car_fast(self):

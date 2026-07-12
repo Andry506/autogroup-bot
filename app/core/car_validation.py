@@ -89,6 +89,42 @@ CAR_REJECT_EXACT: frozenset[str] = frozenset(
 _GREETING_PREFIXES: frozenset[str] = frozenset({"добрый", "доброе", "доброй"})
 _GREETING_SUFFIXES: frozenset[str] = frozenset({"день", "утро", "вечер", "ночи"})
 
+_LEADING_GREETING_PHRASES: tuple[str, ...] = (
+    "добрый день",
+    "добрый вечер",
+    "доброе утро",
+    "доброй ночи",
+    "здравствуйте",
+    "здравствуй",
+    "приветствую",
+    "привет",
+    "добрый",
+    "доброе",
+    "доброй",
+    "hello",
+    "hi",
+    "hey",
+)
+
+
+def strip_greetings_from_car_text(text: str) -> str:
+    """Удаляет приветствия в начале текста перед разбором марки/модели."""
+    result = text.strip()
+    if not result:
+        return result
+
+    changed = True
+    while changed:
+        changed = False
+        lower = result.lower()
+        for phrase in sorted(_LEADING_GREETING_PHRASES, key=len, reverse=True):
+            if lower.startswith(phrase):
+                result = result[len(phrase) :].lstrip(" .,!?:;-–—")
+                changed = True
+                break
+
+    return result.strip()
+
 
 class CarParseResult(TypedDict, total=False):
     brand: str
@@ -344,7 +380,7 @@ def normalize_car(
 
 def parse_car_fast(text: str) -> CarParseResult:
     """Быстрый rule-based разбор без LLM."""
-    text_stripped = text.strip()
+    text_stripped = strip_greetings_from_car_text(text)
     if len(text_stripped) < 2:
         return {"status": "invalid_input", "brand": "", "model": "", "year": "", "generation": "", "confidence": 0.0}
 
@@ -362,11 +398,7 @@ def parse_car_fast(text: str) -> CarParseResult:
             return {"status": "rejected", "brand": "", "model": "", "year": "", "generation": "", "confidence": 0.0}
 
     words = normalized.split()
-    if (
-        len(words) >= 2
-        and words[0] in _GREETING_PREFIXES
-        and words[1] in _GREETING_SUFFIXES
-    ):
+    if not words:
         return {"status": "rejected", "brand": "", "model": "", "year": "", "generation": "", "confidence": 0.0}
 
     result = normalize_car(text_stripped)
@@ -417,14 +449,18 @@ async def parse_car_hybrid(text: str, llm_client: Any) -> CarParseResult:
     Гибридный парсер: сначала правила, при неудаче — LLM.
     Brand = strict, Model = flexible.
     """
-    fast = parse_car_fast(text)
+    cleaned = strip_greetings_from_car_text(text)
+    if not cleaned:
+        return {"status": "rejected", "brand": "", "model": "", "year": "", "generation": "", "confidence": 0.0}
+
+    fast = parse_car_fast(cleaned)
     if fast.get("status") == "ok":
         return fast
 
     if fast.get("status") in {"unknown_brand", "rejected", "invalid_input"}:
         return fast
 
-    ai_result = await parse_car_with_ai(text, llm_client)
+    ai_result = await parse_car_with_ai(cleaned, llm_client)
     if ai_result.get("status") == "ok":
         return ai_result
 

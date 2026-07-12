@@ -16,10 +16,10 @@ from app.core.car_validation import (
     format_car_display,
     is_car_answer_valid,
     is_car_filled,
-    parse_car_fast,
     parse_car_hybrid,
+    strip_greetings_from_car_text,
 )
-from app.core.config import config, validate_config
+from app.core.contact_validation import is_valid_contact
 from app.core.database import engine, Base, ensure_schema
 from app.core.llm_client import LLMClient, fallback_message, is_empty_parsed
 from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
@@ -278,6 +278,12 @@ def cancel_reminder_for_chat(db, chat_id: str) -> None:
     clear_reminder_state(db, chat_id)
 
 
+def get_status_rus(status: str) -> str:
+    if status == "completed":
+        return "Завершена"
+    return status
+
+
 def build_lead_row(lead: Lead) -> dict:
     return {
         "chat_id": lead.chat_id,
@@ -287,7 +293,7 @@ def build_lead_row(lead: Lead) -> dict:
         "timeline": lead.timeline,
         "experience": lead.experience,
         "contact": lead.contact,
-        "status": lead.status,
+        "status": get_status_rus(lead.status),
     }
 
 
@@ -440,60 +446,6 @@ def get_keyboard_for_field(field_name: str):
     return keyboards.get(field_name)
 
 # === ПРОВЕРКА ОТВЕТА (ПОНЯТНЫЙ / НЕ ПОНЯТНЫЙ) ===
-def normalize_car_text(text: str) -> str:
-    normalized = re.sub(r"[^\w\s\-]", " ", text.lower())
-    return re.sub(r"\s+", " ", normalized).strip()
-
-
-def is_known_car_brand(word: str) -> bool:
-    return word.lower().strip() in CAR_KNOWN_BRANDS
-
-
-def is_car_answer_valid(text: str) -> bool:
-    """
-    Проверяет, похож ли ответ на марку/модель автомобиля.
-    Допускается: «BMW X5» (2+ слова) или одно слово — известная марка («BMW»).
-    Отклоняются: приветствия, вежливые слова, «да», «ок» и т.п.
-    """
-    text_stripped = text.strip()
-    if len(text_stripped) < 2:
-        return False
-
-    if not re.search(r"[a-zA-Zа-яА-ЯёЁ]", text_stripped):
-        return False
-    if re.fullmatch(r"[\d\s\W]+", text_stripped):
-        return False
-
-    normalized = normalize_car_text(text_stripped)
-    if not normalized:
-        return False
-
-    if normalized in CAR_REJECT_EXACT:
-        return False
-
-    for phrase in CAR_REJECT_PHRASES:
-        if phrase in normalized:
-            return False
-
-    words = normalized.split()
-    if all(word in CAR_REJECT_WORDS for word in words):
-        return False
-
-    if len(words) >= 2 and words[0] in {"добрый", "доброе", "доброй"}:
-        if words[1] in {"день", "утро", "вечер", "ночи"}:
-            return False
-
-    if len(words) == 1:
-        return is_known_car_brand(words[0])
-
-    if len(words) >= 2:
-        if words[0] in CAR_REJECT_WORDS:
-            return False
-        return True
-
-    return False
-
-
 def is_answer_valid(text: str, field_name: str) -> bool:
     """
     Проверяет, является ли ответ понятным для поля.
@@ -502,7 +454,7 @@ def is_answer_valid(text: str, field_name: str) -> bool:
     text_stripped = text.strip()
 
     if field_name == "car":
-        return is_car_answer_valid(text_stripped)
+        return is_car_answer_valid(strip_greetings_from_car_text(text_stripped))
 
     if field_name == "budget":
         return text_stripped in BUDGET_OPTIONS
@@ -514,12 +466,7 @@ def is_answer_valid(text: str, field_name: str) -> bool:
         return text_stripped in MARKET_OPTIONS
 
     if field_name == "contact":
-        if re.search(r"@\w+", text_stripped):
-            return True
-        cleaned_text = re.sub(r"[\s\(\)\-]", "", text_stripped)
-        if re.search(r"\+?\d{10,15}", cleaned_text):
-            return not re.search(r"[a-zA-Zа-яА-ЯёЁ]", re.sub(r"@\w+", "", text_stripped))
-        return False
+        return is_valid_contact(text_stripped)
 
     return True
 
@@ -534,8 +481,8 @@ def get_invalid_answer_message(field_name: str) -> str:
         "timeline": "Пожалуйста, выберите срок из кнопок ниже:",
         "experience": "Пожалуйста, выберите рынок из кнопок ниже:",
         "contact": (
-            "Пожалуйста, укажите корректный контакт: номер телефона "
-            "или @username в Telegram."
+            "Пожалуйста, введите корректный номер телефона "
+            "(например, +375291234567) или @username в Telegram."
         ),
     }
     return messages.get(field_name, f"🤔 Не совсем понял. Пожалуйста, уточните ответ для поля '{field_name}'.")
@@ -639,10 +586,7 @@ def is_contact_like_text(text: str) -> bool:
     """Определяет, похож ли текст на номер телефона или @username."""
     if text.strip() in BUDGET_OPTIONS:
         return False
-    if re.search(r"@\w+", text):
-        return True
-    cleaned_text = re.sub(r"[\s\(\)\-]", "", text)
-    return bool(re.search(r"\+?\d{10,15}", cleaned_text))
+    return is_valid_contact(text)
 
 
 def log_fsm_state(
@@ -752,7 +696,7 @@ async def apply_parsed_fields(
         if not clean_value:
             continue
         if field == "car":
-            car_result = await parse_car_hybrid(clean_value, llm)
+            car_result = await parse_car_hybrid(strip_greetings_from_car_text(clean_value), llm)
             if car_result.get("status") != "ok":
                 continue
             clean_value = car_to_db(car_result)
@@ -1298,6 +1242,13 @@ async def handle_message(message: types.Message):
                 await send_current_field_prompt(message, db, chat_id, expected_field)
                 return
             lead.contact = clean_text(shared_contact.phone_number)
+            if not is_valid_contact(lead.contact):
+                await send_reply(
+                    message,
+                    get_invalid_answer_message("contact"),
+                    reply_markup=get_contact_keyboard(),
+                )
+                return
             set_awaiting_manual_contact(db, chat_id, False)
             skip_field_processing = True
             logger.info("📱 Получен номер телефона: %s", lead.contact)
@@ -1321,7 +1272,8 @@ async def handle_message(message: types.Message):
             ):
                 field_name = expected_field.value
                 if field_name == "car":
-                    car_parse_result = await parse_car_hybrid(text, llm)
+                    car_text = strip_greetings_from_car_text(text)
+                    car_parse_result = await parse_car_hybrid(car_text, llm)
                     is_valid = car_parse_result.get("status") == "ok"
                 else:
                     is_valid = is_answer_valid(text, field_name)
