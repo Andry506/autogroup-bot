@@ -23,6 +23,7 @@ from app.core.contact_validation import is_valid_contact
 from app.core.database import engine, Base, ensure_schema
 from app.core.llm_client import LLMClient, fallback_message, is_empty_parsed
 from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
+from app.core.config import config, validate_config
 from app.core.telegram_utils import format_client_summary, format_manager_notification
 from app.integrations.google_sheets import GoogleSheetsClient
 from app.models.lead import Lead
