@@ -3,11 +3,15 @@
 import unittest
 
 from app.core.car_validation import (
+    CAR_UNKNOWN_VALUE,
     car_to_db,
     format_car_display,
     is_car_answer_valid,
+    is_car_field_valid,
+    is_car_unknown_response,
     normalize_car,
     parse_car_fast,
+    strip_greetings_from_car_text,
     validate_model_candidate,
 )
 
@@ -23,7 +27,8 @@ class CarValidationAcceptTests(unittest.TestCase):
         ("BYD Sealion 7", "BYD", "Sealion 7"),
         ("тойота равчик", "Toyota", "RAV4"),
         ("geely монжаро", "Geely", "Monjaro"),
-        ("BMW iX", "BMW", "iX"),
+        ("Добрый день. Audi RS6", "Audi", "RS6"),
+        ("Mersedes S63", "Mercedes", "S63"),
     ]
 
     def test_parse_car_fast(self):
@@ -58,8 +63,30 @@ class CarValidationRejectTests(unittest.TestCase):
     def test_reject(self):
         for raw in self.CASES:
             with self.subTest(raw=raw):
-                self.assertFalse(is_car_answer_valid(raw), f"должно отклоняться: {raw!r}")
+                self.assertFalse(is_car_field_valid(raw), f"должно отклоняться: {raw!r}")
                 self.assertNotEqual(parse_car_fast(raw).get("status"), "ok")
+
+
+class CarUnknownTests(unittest.TestCase):
+    def test_unknown_phrases(self):
+        for phrase in ("не знаю", "пока не уверен", "затрудняюсь ответить", "не могу выбрать"):
+            with self.subTest(phrase=phrase):
+                self.assertTrue(is_car_unknown_response(phrase))
+                self.assertTrue(is_car_field_valid(phrase))
+
+    def test_random_text_not_unknown(self):
+        self.assertFalse(is_car_unknown_response("BMW X5 и Audi e-tron"))
+
+
+class CarMultiTests(unittest.TestCase):
+    def test_multi_car_valid(self):
+        self.assertTrue(is_car_field_valid("BMW X5 и Audi e-tron"))
+
+
+class CarUnknownDisplayTests(unittest.TestCase):
+    def test_unknown_display(self):
+        stored = car_to_db({"brand": "", "model": CAR_UNKNOWN_VALUE, "year": "", "generation": ""})
+        self.assertEqual(format_car_display(stored), CAR_UNKNOWN_VALUE)
 
 
 class ValidateModelCandidateTests(unittest.TestCase):

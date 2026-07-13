@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, JSON
+from sqlalchemy import Column, String, DateTime, JSON, Index
 from app.core.database import Base
 from datetime import datetime
 import uuid
@@ -6,6 +6,10 @@ import uuid
 class Lead(Base):
     """Модель заявки клиента"""
     __tablename__ = "leads"
+
+    __table_args__ = (
+        Index("idx_chat_id_status", "chat_id", "status"),
+    )
     
     # Уникальный ID заявки
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

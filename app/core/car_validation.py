@@ -89,6 +89,164 @@ CAR_REJECT_EXACT: frozenset[str] = frozenset(
 _GREETING_PREFIXES: frozenset[str] = frozenset({"добрый", "доброе", "доброй"})
 _GREETING_SUFFIXES: frozenset[str] = frozenset({"день", "утро", "вечер", "ночи"})
 
+_LEADING_GREETING_PHRASES: tuple[str, ...] = (
+    "добрый день",
+    "добрый вечер",
+    "доброе утро",
+    "доброй ночи",
+    "здравствуйте",
+    "здравствуй",
+    "приветствую",
+    "привет",
+    "добрый",
+    "доброе",
+    "доброй",
+    "hello",
+    "hi",
+    "hey",
+)
+
+
+def strip_greetings_from_car_text(text: str) -> str:
+    """Удаляет приветствия в начале текста перед разбором марки/модели."""
+    result = text.strip()
+    if not result:
+        return result
+
+    changed = True
+    while changed:
+        changed = False
+        lower = result.lower()
+        for phrase in sorted(_LEADING_GREETING_PHRASES, key=len, reverse=True):
+            if lower.startswith(phrase):
+                result = result[len(phrase) :].lstrip(" .,!?:;-–—")
+                changed = True
+                break
+
+    return result.strip()
+
+
+CAR_UNKNOWN_VALUE = "Не указано"
+
+CAR_UNKNOWN_PHRASES: frozenset[str] = frozenset(
+    {
+        "не знаю",
+        "не знаю пока",
+        "пока не знаю",
+        "пока не уверен",
+        "пока не уверена",
+        "затрудняюсь ответить",
+        "затрудняюсь",
+        "ещё не решил",
+        "еще не решил",
+        "ещё не решила",
+        "еще не решила",
+        "не решил",
+        "не решила",
+        "подскажите",
+        "не могу выбрать",
+        "не выбрал",
+        "не выбрала",
+        "не определился",
+        "не определилась",
+        "не уверен",
+        "не уверена",
+    }
+)
+
+CAR_MULTI_SEPARATOR_RE = re.compile(r"\s+и\s+|,|;|/|\s+или\s+", re.IGNORECASE)
+
+
+def is_car_unknown_response(text: str) -> bool:
+    """Проверяет, что ответ — именно фраза незнания, а не случайный текст."""
+    normalized = _normalize_key(text)
+    if not normalized:
+        return False
+    if normalized in CAR_UNKNOWN_PHRASES:
+        return True
+
+    words = normalized.split()
+    if len(words) > 6:
+        return False
+
+    for phrase in sorted(CAR_UNKNOWN_PHRASES, key=len, reverse=True):
+        if normalized == phrase:
+            return True
+        if len(words) <= 4 and phrase in normalized and len(normalized) <= len(phrase) + 8:
+            return normalized.startswith(phrase) or normalized.endswith(phrase)
+
+    return False
+
+
+def car_unknown_to_db() -> dict[str, str]:
+    return {
+        "brand": "",
+        "model": CAR_UNKNOWN_VALUE,
+        "year": "",
+        "generation": "",
+    }
+
+
+def split_car_candidates(text: str) -> list[str]:
+    cleaned = strip_greetings_from_car_text(text)
+    parts = [part.strip() for part in CAR_MULTI_SEPARATOR_RE.split(cleaned) if part.strip()]
+    return parts
+
+
+def looks_like_multiple_cars(text: str) -> bool:
+    cleaned = strip_greetings_from_car_text(text)
+    if is_car_unknown_response(cleaned):
+        return False
+    return bool(CAR_MULTI_SEPARATOR_RE.search(cleaned))
+
+
+def is_car_field_valid(text: str) -> bool:
+    cleaned = strip_greetings_from_car_text(text)
+    if is_car_unknown_response(cleaned):
+        return True
+    if looks_like_multiple_cars(cleaned):
+        parts = split_car_candidates(cleaned)
+        if len(parts) < 2:
+            return False
+        valid_parts = 0
+        for part in parts:
+            if is_car_unknown_response(part):
+                valid_parts += 1
+            elif parse_car_fast(part).get("status") == "ok":
+                valid_parts += 1
+        return valid_parts >= 2
+    return parse_car_fast(cleaned).get("status") == "ok"
+
+
+async def parse_car_answer(text: str, llm_client: Any) -> CarParseResult:
+    """Разбирает ответ на вопрос об автомобиле: незнание, несколько авто или одно авто."""
+    cleaned = strip_greetings_from_car_text(text)
+    if is_car_unknown_response(cleaned):
+        return {**car_unknown_to_db(), "status": "ok", "source": "unknown"}
+
+    if looks_like_multiple_cars(cleaned):
+        parts = split_car_candidates(cleaned)
+        displays: list[str] = []
+        for part in parts:
+            if is_car_unknown_response(part):
+                displays.append(CAR_UNKNOWN_VALUE)
+                continue
+            result = await parse_car_hybrid(part, llm_client)
+            if result.get("status") == "ok":
+                displays.append(format_car_display(car_to_db(result)))
+
+        if len(displays) >= 2:
+            return {
+                "status": "ok",
+                "brand": "",
+                "model": ", ".join(displays),
+                "year": "",
+                "generation": "",
+                "source": "multi",
+            }
+
+    return await parse_car_hybrid(cleaned, llm_client)
+
 
 class CarParseResult(TypedDict, total=False):
     brand: str
@@ -344,7 +502,7 @@ def normalize_car(
 
 def parse_car_fast(text: str) -> CarParseResult:
     """Быстрый rule-based разбор без LLM."""
-    text_stripped = text.strip()
+    text_stripped = strip_greetings_from_car_text(text)
     if len(text_stripped) < 2:
         return {"status": "invalid_input", "brand": "", "model": "", "year": "", "generation": "", "confidence": 0.0}
 
@@ -362,11 +520,7 @@ def parse_car_fast(text: str) -> CarParseResult:
             return {"status": "rejected", "brand": "", "model": "", "year": "", "generation": "", "confidence": 0.0}
 
     words = normalized.split()
-    if (
-        len(words) >= 2
-        and words[0] in _GREETING_PREFIXES
-        and words[1] in _GREETING_SUFFIXES
-    ):
+    if not words:
         return {"status": "rejected", "brand": "", "model": "", "year": "", "generation": "", "confidence": 0.0}
 
     result = normalize_car(text_stripped)
@@ -417,14 +571,18 @@ async def parse_car_hybrid(text: str, llm_client: Any) -> CarParseResult:
     Гибридный парсер: сначала правила, при неудаче — LLM.
     Brand = strict, Model = flexible.
     """
-    fast = parse_car_fast(text)
+    cleaned = strip_greetings_from_car_text(text)
+    if not cleaned:
+        return {"status": "rejected", "brand": "", "model": "", "year": "", "generation": "", "confidence": 0.0}
+
+    fast = parse_car_fast(cleaned)
     if fast.get("status") == "ok":
         return fast
 
     if fast.get("status") in {"unknown_brand", "rejected", "invalid_input"}:
         return fast
 
-    ai_result = await parse_car_with_ai(text, llm_client)
+    ai_result = await parse_car_with_ai(cleaned, llm_client)
     if ai_result.get("status") == "ok":
         return ai_result
 
@@ -432,9 +590,8 @@ async def parse_car_hybrid(text: str, llm_client: Any) -> CarParseResult:
 
 
 def is_car_answer_valid(text: str) -> bool:
-    """Синхронная проверка (быстрый путь + гибкая модель)."""
-    result = parse_car_fast(text)
-    return result.get("status") == "ok"
+    """Синхронная проверка (незнание, несколько авто, одно авто)."""
+    return is_car_field_valid(text)
 
 
 def car_to_db(parsed: CarParseResult | dict[str, Any]) -> dict[str, str]:
@@ -473,6 +630,11 @@ def car_from_storage(value: Any) -> dict[str, str]:
 
 def is_car_filled(value: Any) -> bool:
     data = car_from_storage(value)
+    model = data.get("model", "")
+    if model in {CAR_UNKNOWN_VALUE, "Не выбрано"}:
+        return True
+    if model and not data.get("brand"):
+        return True
     return bool(data.get("brand") and data.get("model"))
 
 
