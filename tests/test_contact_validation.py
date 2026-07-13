@@ -18,8 +18,10 @@ class ContactValidationTests(unittest.TestCase):
         self.assertTrue(is_valid_contact("+375 (29) 123-45-67"))
         self.assertTrue(is_valid_contact("+79161234567"))
 
+
     def test_valid_username(self):
         self.assertTrue(is_valid_contact("@username"))
+
 
     def test_invalid_phone_numbers(self):
         self.assertFalse(is_valid_contact("123456"))
@@ -44,6 +46,7 @@ class ContactValidationTests(unittest.TestCase):
         ok, _, error = normalize_contact("+9991234567890")
         self.assertFalse(ok)
         self.assertEqual(error, INVALID_COUNTRY_CODE_MESSAGE)
+
 
 
 if __name__ == "__main__":

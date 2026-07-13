@@ -26,10 +26,11 @@ from app.core.contact_validation import (
     is_valid_contact,
     normalize_contact,
 )
-from app.core.config import config, validate_config
+from app.core.contact_validation import is_valid_contact
 from app.core.database import engine, Base, ensure_schema
 from app.core.llm_client import LLMClient, fallback_message, is_empty_parsed
 from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
+from app.core.config import config, validate_config
 from app.core.telegram_utils import format_client_summary, format_manager_notification
 from app.integrations.google_sheets import GoogleSheetsClient
 from app.models.lead import Lead
@@ -591,6 +592,7 @@ def is_answer_valid(text: str, field_name: str) -> bool:
         return text_stripped in MARKET_OPTIONS
 
     if field_name == "contact":
+
         if re.search(r"@\w+", text_stripped):
             return True
         return is_phone_number_valid(text_stripped)
@@ -727,6 +729,7 @@ def is_contact_like_text(text: str) -> bool:
     return is_phone_number_valid(text)
 
 
+
 def log_fsm_state(
     lead: Lead,
     chat_id: str,
@@ -837,6 +840,7 @@ async def apply_parsed_fields(
             continue
         if field == "car":
             car_result = await parse_car_answer(strip_greetings_from_car_text(clean_value), llm)
+
             if car_result.get("status") != "ok":
                 continue
             clean_value = car_to_db(car_result)
@@ -1603,7 +1607,9 @@ async def handle_message(message: types.Message):
                 field_name = expected_field.value
                 if field_name == "car":
                     car_text = strip_greetings_from_car_text(text)
+                    
                     car_parse_result = await parse_car_answer(car_text, llm)
+
                     is_valid = car_parse_result.get("status") == "ok"
                 else:
                     is_valid = is_answer_valid(text, field_name)
