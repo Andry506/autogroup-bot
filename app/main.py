@@ -11,6 +11,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import sessionmaker
+from app.core.config import config, validate_config
 from app.core.car_validation import (
     car_to_db,
     format_car_display,
