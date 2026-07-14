@@ -12,6 +12,36 @@ POSTPONE_ACK_MESSAGE = (
     "Хорошо, я подожду. Напишите, когда будете готовы продолжить."
 )
 
+REMINDER_WAITING_PREFIX = "🤔 Я всё ещё жду ваш ответ:"
+REMINDER_POSTPONE_HINT = "Если вам нужно больше времени — просто напишите 'позже'."
+
+
+def normalize_reminder_question(question_text: str) -> str:
+    """Убирает приветствие из текста вопроса (для старых сохранённых напоминаний)."""
+    text = (question_text or "").strip()
+    if not text:
+        return text
+
+    if "Здравствуйте" in text and "🚗" in text:
+        car_idx = text.find("🚗")
+        if car_idx != -1:
+            return text[car_idx:].strip()
+
+    if "Конечно! Давайте создадим новую заявку" in text and "\n\n" in text:
+        return text.rsplit("\n\n", 1)[-1].strip()
+
+    return text
+
+
+def format_reminder_message(question_text: str) -> str:
+    """Формирует текст напоминания: фраза ожидания + вопрос + подсказка про «позже»."""
+    question = normalize_reminder_question(question_text)
+    return (
+        f"{REMINDER_WAITING_PREFIX}\n\n"
+        f"{question}\n\n"
+        f"{REMINDER_POSTPONE_HINT}"
+    )
+
 
 def is_later_response(text: str) -> bool:
     """Проверяет, просит ли пользователь отложить ответ."""
@@ -93,10 +123,7 @@ class ReminderService:
                 try:
                     await self.bot.send_message(
                         chat_id=chat_id,
-                        text=(
-                            f"🤔 Я все еще жду ваш ответ: {question_text}\n\n"
-                            f"Если вам нужно больше времени — просто напишите 'позже'."
-                        )
+                        text=format_reminder_message(question_text),
                     )
                     reminders_sent += 1
                     self._reminder_count[chat_id] = reminders_sent

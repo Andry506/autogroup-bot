@@ -5,7 +5,7 @@ BRAND_ALIAS_GROUPS: list[tuple[str, list[str]]] = [
     # --- Массовые мировые ---
     ("Toyota", ["toyota", "тойота", "тоёта", "тайота"]),
     ("BMW", ["bmw", "бмв", "бмдаблювей", "бэха", "бэху"]),
-    ("Mercedes", ["mercedes", "mercedes-benz", "mercedes benz", "мерседес", "мерс", "мерин", "мерседес-бенц"]),
+    ("Mercedes", ["mercedes", "mercedes-benz", "mercedes benz", "мерседес", "мерс", "мерин", "мерседес-бенц", "mersedes"]),
     ("Audi", ["audi", "ауди"]),
     ("Lexus", ["lexus", "лексус"]),
     ("Honda", ["honda", "хонда"]),
@@ -93,11 +93,12 @@ BRAND_ALIAS_GROUPS: list[tuple[str, list[str]]] = [
     ("Omoda", ["omoda", "омода"]),
     ("Jaecoo", ["jaecoo", "джеку", "жаеку", "жаку"]),
     ("Changan", ["changan", "чанган"]),
-    ("Dongfeng", ["dongfeng", "донгфенг"]),
+    ("Dongfeng", ["dongfeng", "dong feng", "донгфенг", "донгфенд", "донг фенг", "донг фенд"]),
     ("Foton", ["foton", "фотон"]),
     ("GAC", ["gac", "гак", "гуанчжоу"]),
     ("Hongqi", ["hongqi", "хонги", "хунци", "хунци"]),
-    ("Li Auto", ["li auto", "lixiang", "ли авто", "лисян"]),
+    ("Li Auto", ["li auto", "ли авто"]),
+    ("Lixiang", ["lixiang", "лисян", "лисиан", "lisian", "лисан", "ли сян"]),
     ("NIO", ["nio", "нио"]),
     ("Xpeng", ["xpeng", "ксяпенг", "икспенг", "сяопэн"]),
     ("Zeekr", ["zeekr", "зикр", "зикер"]),
@@ -271,6 +272,7 @@ MODEL_ALIAS_GROUPS: list[tuple[str, list[str]]] = [
     ("TT", ["tt", "тт"]),
     ("R8", ["r8", "р8"]),
     ("RS6", ["rs6", "рс6"]),
+    ("S63", ["s63", "с63", "s 63"]),
     ("RS7", ["rs7", "рс7"]),
     ("SQ5", ["sq5", "ску5"]),
     ("SQ7", ["sq7", "ску7"]),
@@ -910,3 +912,4 @@ MODEL_ALIAS_GROUPS: list[tuple[str, list[str]]] = [
 ]
 
 BRAND_CANONICAL: frozenset[str] = frozenset(name for name, _ in BRAND_ALIAS_GROUPS)
+CAR_KNOWN_BRANDS: frozenset[str] = BRAND_CANONICAL

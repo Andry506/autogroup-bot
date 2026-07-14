@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, JSON
+from sqlalchemy import Column, String, DateTime, JSON, Index, Integer
 from app.core.database import Base
 from datetime import datetime
 import uuid
@@ -6,6 +6,10 @@ import uuid
 class Lead(Base):
     """Модель заявки клиента"""
     __tablename__ = "leads"
+
+    __table_args__ = (
+        Index("idx_chat_id_status", "chat_id", "status"),
+    )
     
     # Уникальный ID заявки
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -26,6 +30,8 @@ class Lead(Base):
     export_status = Column(String(50), default="")  # pending, exported, failed
     pending_state = Column(JSON, default=dict)  # Промежуточное состояние диалога
     dialog_history = Column(JSON, default=list)  # История всего диалога
+    # message_id исходного уведомления менеджеру (для reply при изменениях)
+    manager_notification_message_id = Column(Integer, nullable=True)
     
     # Даты
     created_at = Column(DateTime, default=datetime.utcnow)

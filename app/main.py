@@ -5,10 +5,10 @@ import re
 from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import BotCommand, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import sessionmaker
 from app.core.car_validation import (
@@ -16,14 +16,25 @@ from app.core.car_validation import (
     format_car_display,
     is_car_answer_valid,
     is_car_filled,
-    parse_car_fast,
+    parse_car_answer,
     parse_car_hybrid,
+    strip_greetings_from_car_text,
+)
+from app.core.contact_validation import (
+    INVALID_COUNTRY_CODE_MESSAGE,
+    is_phone_number_valid,
+    is_valid_contact,
+    normalize_contact,
 )
 from app.core.config import config, validate_config
 from app.core.database import engine, Base, ensure_schema
 from app.core.llm_client import LLMClient, fallback_message, is_empty_parsed
 from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
-from app.core.telegram_utils import format_client_summary, format_manager_notification
+from app.core.telegram_utils import (
+    format_client_summary,
+    format_manager_notification,
+    format_manager_update_notification,
+)
 from app.integrations.google_sheets import GoogleSheetsClient
 from app.models.lead import Lead
 from app.services.fsm_service import FSMService, LEAD_FIELDS, LeadField
@@ -82,6 +93,8 @@ REMINDER_MAX_KEY = "reminder_max_reminders"
 REMINDER_INTERVAL_KEY = "reminder_interval_seconds"
 REMINDER_STARTED_AT_KEY = "reminder_started_at"
 AWAITING_MANUAL_CONTACT_KEY = "awaiting_manual_contact"
+EDIT_MODE_KEY = "edit_mode"
+EDITING_FIELD_KEY = "editing_field"
 
 
 CHANGE_KEYWORDS = [
@@ -102,6 +115,16 @@ FIELD_LABELS = {
     "contact": "контакт",
 }
 
+FIELD_MENU_LABELS = {
+    "car": "Автомобиль",
+    "budget": "Бюджет",
+    "timeline": "Срок",
+    "experience": "Рынок",
+    "contact": "Контакт",
+}
+
+FIELD_MENU_TO_NAME = {label: name for name, label in FIELD_MENU_LABELS.items()}
+
 VALIDATED_FIELDS = ["car", "budget", "timeline", "experience", "contact"]
 BUTTON_FIELDS = frozenset({"budget", "timeline", "experience"})
 
@@ -110,8 +133,14 @@ NO_CONFIRM_WORDS = ["нет", "no", "неа", "оставь", "отмена", "�
 
 
 COMPLETED_LEAD_HINT = (
-    "✅ Ваша заявка уже принята. Менеджер свяжется с вами в ближайшее время.\n\n"
-    "Чтобы оставить новую заявку, отправьте /new"
+    "✅ Ваша заявка уже принята. Менеджер свяжется с Вами в ближайшее время.\n\n"
+    "Чтобы оставить новую заявку, отправьте /new.\n"
+    "Чтобы изменить данные, нажмите «Изменить заявку»."
+)
+
+POST_COMPLETION_HINT = (
+    "Если хотите изменить данные в заявке — нажмите на кнопку «Изменить заявку» ниже.\n"
+    "Если хотите начать новую заявку — нажмите «Новая заявка»."
 )
 
 HELP_TEXT = (
@@ -126,6 +155,7 @@ HELP_TEXT = (
     "/start — начать работу с ботом\n"
     "/new — оставить новую заявку\n"
     "/cancel — отменить текущий диалог\n"
+    "/change — изменить уже данный ответ\n"
     "/help — показать эту справку"
 )
 
@@ -142,6 +172,11 @@ def get_welcome_with_car_question() -> str:
     return f"{get_welcome_text()}\n\n{car_question}"
 
 
+def get_new_application_start_text() -> str:
+    car_question = FSMService.get_question_for_field(LeadField.CAR)
+    return f"Конечно! Давайте создадим новую заявку.\n\n{car_question}"
+
+
 def get_active_lead(db, chat_id: str) -> Lead | None:
     """Возвращает незавершённую заявку пользователя."""
     return (
@@ -152,17 +187,80 @@ def get_active_lead(db, chat_id: str) -> Lead | None:
     )
 
 
-def get_pending_state(db, chat_id: str) -> dict:
-    """Возвращает pending_state активного лида из БД."""
-    lead = get_active_lead(db, chat_id)
+def get_latest_completed_lead(db, chat_id: str) -> Lead | None:
+    return (
+        db.query(Lead)
+        .filter(Lead.chat_id == chat_id, Lead.status == "completed")
+        .order_by(Lead.created_at.desc())
+        .first()
+    )
+
+
+def get_working_lead(db, chat_id: str) -> Lead | None:
+    active = get_active_lead(db, chat_id)
+    if active:
+        return active
+
+    completed = get_latest_completed_lead(db, chat_id)
+    if completed and (completed.pending_state or {}).get(EDIT_MODE_KEY):
+        return completed
+    return None
+
+
+def get_lead_pending_state(lead: Lead | None) -> dict:
     if not lead or not lead.pending_state:
         return {}
     return dict(lead.pending_state)
 
 
-def set_pending_state(db, chat_id: str, state: dict | None) -> None:
-    """Сохраняет pending_state активного лида в БД."""
-    lead = get_active_lead(db, chat_id)
+def get_expected_field(db, chat_id: str, lead: Lead) -> LeadField | None:
+    state = get_lead_pending_state(lead)
+    editing_field = state.get(EDITING_FIELD_KEY)
+    if editing_field:
+        try:
+            return LeadField(editing_field)
+        except ValueError:
+            pass
+    return FSMService.get_next_field(get_lead_data(lead))
+
+
+def set_edit_mode(db, lead: Lead, enabled: bool = True) -> None:
+    state = get_lead_pending_state(lead)
+    if enabled:
+        state[EDIT_MODE_KEY] = True
+    else:
+        state.pop(EDIT_MODE_KEY, None)
+        state.pop(EDITING_FIELD_KEY, None)
+    lead.pending_state = state
+
+
+def start_field_edit(db, chat_id: str, lead: Lead, field_name: str) -> None:
+    state = get_lead_pending_state(lead)
+    state[EDIT_MODE_KEY] = True
+    state[EDITING_FIELD_KEY] = field_name
+    lead.pending_state = state
+    cancel_reminder_for_chat(db, chat_id)
+
+
+def clear_field_edit(db, chat_id: str, lead: Lead) -> None:
+    state = get_lead_pending_state(lead)
+    state.pop(EDITING_FIELD_KEY, None)
+    lead.pending_state = state
+
+
+def get_filled_fields(lead_data: dict[str, str]) -> list[str]:
+    return [field for field in LEAD_FIELDS if lead_data.get(field)]
+
+
+def get_pending_state(db, chat_id: str, lead: Lead | None = None) -> dict:
+    """Возвращает pending_state рабочего лида из БД."""
+    lead = lead or get_working_lead(db, chat_id)
+    return get_lead_pending_state(lead)
+
+
+def set_pending_state(db, chat_id: str, state: dict | None, lead: Lead | None = None) -> None:
+    """Сохраняет pending_state рабочего лида в БД."""
+    lead = lead or get_working_lead(db, chat_id)
     if not lead:
         return
     lead.pending_state = state or {}
@@ -278,6 +376,12 @@ def cancel_reminder_for_chat(db, chat_id: str) -> None:
     clear_reminder_state(db, chat_id)
 
 
+def get_status_rus(status: str) -> str:
+    if status == "completed":
+        return "Завершена"
+    return status
+
+
 def build_lead_row(lead: Lead) -> dict:
     return {
         "chat_id": lead.chat_id,
@@ -287,7 +391,7 @@ def build_lead_row(lead: Lead) -> dict:
         "timeline": lead.timeline,
         "experience": lead.experience,
         "contact": lead.contact,
-        "status": lead.status,
+        "status": get_status_rus(lead.status),
     }
 
 
@@ -410,11 +514,42 @@ def get_experience_keyboard() -> ReplyKeyboardMarkup:
 def get_new_application_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="/new")],
+            [KeyboardButton(text="Новая заявка")],
+            [KeyboardButton(text="Изменить заявку")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+
+def get_edit_fields_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Автомобиль"), KeyboardButton(text="Бюджет")],
+            [KeyboardButton(text="Срок"), KeyboardButton(text="Рынок")],
+            [KeyboardButton(text="Контакт")],
+            [KeyboardButton(text="Готово")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+
+def get_change_fields_keyboard(lead_data: dict[str, str]) -> ReplyKeyboardMarkup | None:
+    filled = get_filled_fields(lead_data)
+    if not filled:
+        return None
+
+    rows: list[list[KeyboardButton]] = []
+    current_row: list[KeyboardButton] = []
+    for field_name in filled:
+        current_row.append(KeyboardButton(text=f"Изменить {FIELD_MENU_LABELS[field_name].lower()}"))
+        if len(current_row) == 2:
+            rows.append(current_row)
+            current_row = []
+    if current_row:
+        rows.append(current_row)
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, one_time_keyboard=True)
 
 def get_contact_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -440,60 +575,6 @@ def get_keyboard_for_field(field_name: str):
     return keyboards.get(field_name)
 
 # === ПРОВЕРКА ОТВЕТА (ПОНЯТНЫЙ / НЕ ПОНЯТНЫЙ) ===
-def normalize_car_text(text: str) -> str:
-    normalized = re.sub(r"[^\w\s\-]", " ", text.lower())
-    return re.sub(r"\s+", " ", normalized).strip()
-
-
-def is_known_car_brand(word: str) -> bool:
-    return word.lower().strip() in CAR_KNOWN_BRANDS
-
-
-def is_car_answer_valid(text: str) -> bool:
-    """
-    Проверяет, похож ли ответ на марку/модель автомобиля.
-    Допускается: «BMW X5» (2+ слова) или одно слово — известная марка («BMW»).
-    Отклоняются: приветствия, вежливые слова, «да», «ок» и т.п.
-    """
-    text_stripped = text.strip()
-    if len(text_stripped) < 2:
-        return False
-
-    if not re.search(r"[a-zA-Zа-яА-ЯёЁ]", text_stripped):
-        return False
-    if re.fullmatch(r"[\d\s\W]+", text_stripped):
-        return False
-
-    normalized = normalize_car_text(text_stripped)
-    if not normalized:
-        return False
-
-    if normalized in CAR_REJECT_EXACT:
-        return False
-
-    for phrase in CAR_REJECT_PHRASES:
-        if phrase in normalized:
-            return False
-
-    words = normalized.split()
-    if all(word in CAR_REJECT_WORDS for word in words):
-        return False
-
-    if len(words) >= 2 and words[0] in {"добрый", "доброе", "доброй"}:
-        if words[1] in {"день", "утро", "вечер", "ночи"}:
-            return False
-
-    if len(words) == 1:
-        return is_known_car_brand(words[0])
-
-    if len(words) >= 2:
-        if words[0] in CAR_REJECT_WORDS:
-            return False
-        return True
-
-    return False
-
-
 def is_answer_valid(text: str, field_name: str) -> bool:
     """
     Проверяет, является ли ответ понятным для поля.
@@ -502,7 +583,7 @@ def is_answer_valid(text: str, field_name: str) -> bool:
     text_stripped = text.strip()
 
     if field_name == "car":
-        return is_car_answer_valid(text_stripped)
+        return is_car_answer_valid(strip_greetings_from_car_text(text_stripped))
 
     if field_name == "budget":
         return text_stripped in BUDGET_OPTIONS
@@ -516,12 +597,18 @@ def is_answer_valid(text: str, field_name: str) -> bool:
     if field_name == "contact":
         if re.search(r"@\w+", text_stripped):
             return True
-        cleaned_text = re.sub(r"[\s\(\)\-]", "", text_stripped)
-        if re.search(r"\+?\d{10,15}", cleaned_text):
-            return not re.search(r"[a-zA-Zа-яА-ЯёЁ]", re.sub(r"@\w+", "", text_stripped))
-        return False
+        return is_phone_number_valid(text_stripped)
 
     return True
+
+
+def get_contact_error_message(text: str) -> str:
+    ok, _, error = normalize_contact(text)
+    if ok:
+        return get_invalid_answer_message("contact")
+    if error == INVALID_COUNTRY_CODE_MESSAGE:
+        return INVALID_COUNTRY_CODE_MESSAGE
+    return error or get_invalid_answer_message("contact")
 
 
 def get_invalid_answer_message(field_name: str) -> str:
@@ -534,8 +621,8 @@ def get_invalid_answer_message(field_name: str) -> str:
         "timeline": "Пожалуйста, выберите срок из кнопок ниже:",
         "experience": "Пожалуйста, выберите рынок из кнопок ниже:",
         "contact": (
-            "Пожалуйста, укажите корректный контакт: номер телефона "
-            "или @username в Telegram."
+            "Пожалуйста, введите корректный номер телефона "
+            "(например, +375291234567) или @username в Telegram."
         ),
     }
     return messages.get(field_name, f"🤔 Не совсем понял. Пожалуйста, уточните ответ для поля '{field_name}'.")
@@ -641,8 +728,7 @@ def is_contact_like_text(text: str) -> bool:
         return False
     if re.search(r"@\w+", text):
         return True
-    cleaned_text = re.sub(r"[\s\(\)\-]", "", text)
-    return bool(re.search(r"\+?\d{10,15}", cleaned_text))
+    return is_phone_number_valid(text)
 
 
 def log_fsm_state(
@@ -682,7 +768,9 @@ def apply_expected_field_answer(
     if field_name in {"budget", "timeline", "experience"}:
         value = text.strip()
     elif field_name == "contact":
-        value = clean_text(text)
+        ok, value, _ = normalize_contact(text)
+        if not ok:
+            return False
     else:
         value = clean_text(text)
     if field_name == "budget":
@@ -752,7 +840,7 @@ async def apply_parsed_fields(
         if not clean_value:
             continue
         if field == "car":
-            car_result = await parse_car_hybrid(clean_value, llm)
+            car_result = await parse_car_answer(strip_greetings_from_car_text(clean_value), llm)
             if car_result.get("status") != "ok":
                 continue
             clean_value = car_to_db(car_result)
@@ -764,6 +852,12 @@ async def apply_parsed_fields(
             continue
         if field == "contact" and not is_answer_valid(clean_value, "contact"):
             continue
+
+        if field == "contact":
+            ok, normalized, _ = normalize_contact(clean_value)
+            if not ok:
+                continue
+            clean_value = normalized
 
         current_raw = getattr(lead, field)
         if field == "car":
@@ -893,22 +987,135 @@ async def begin_lead_dialog(
 ) -> None:
     """Отправляет стартовое сообщение и планирует напоминание для первого вопроса."""
     chat_id = str(message.chat.id)
-    welcome_text = get_welcome_with_car_question() if include_welcome else FSMService.get_question_for_field(LeadField.CAR)
+    if include_welcome:
+        display_text = get_welcome_with_car_question()
+    else:
+        display_text = get_new_application_start_text()
 
-    await send_reply(message, welcome_text)
-    await schedule_question_reminder(db, chat_id, welcome_text)
+    car_question = FSMService.get_question_for_field(LeadField.CAR)
+
+    await send_reply(message, display_text)
+    await schedule_question_reminder(db, chat_id, car_question)
 
     dialog = list(lead.dialog_history or [])
     dialog.append(
         {
             "role": "assistant",
-            "text": welcome_text,
+            "text": display_text,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     )
     lead.dialog_history = trim_dialog_history(dialog)
     db.commit()
     logger.info("🆕 Начат диалог для lead_id=%s", lead.id)
+
+async def notify_manager(lead: Lead, *, is_update: bool = False) -> None:
+    """Отправляет менеджеру/в группу уведомление о новой заявке или об её изменении."""
+    notification_chat_id = config.GROUP_CHAT_ID or config.MANAGER_CHAT_ID
+    if not notification_chat_id:
+        return
+
+    text = (
+        format_manager_update_notification(lead)
+        if is_update
+        else format_manager_notification(lead)
+    )
+    kwargs = {
+        "chat_id": int(notification_chat_id),
+        "text": text,
+        "parse_mode": ParseMode.HTML,
+    }
+
+    reply_to_id = lead.manager_notification_message_id if is_update else None
+    if reply_to_id:
+        kwargs["reply_to_message_id"] = int(reply_to_id)
+
+    target = "в группу" if config.GROUP_CHAT_ID else "менеджеру"
+
+    try:
+        sent = await bot.send_message(**kwargs)
+        if not is_update:
+            lead.manager_notification_message_id = sent.message_id
+        logger.info(
+            "📨 Уведомление%s отправлено %s: lead_id=%s, reply_to=%s",
+            " об изменении" if is_update else "",
+            target,
+            lead.id,
+            reply_to_id,
+        )
+    except Exception as e:
+        # Для старых/удалённых сообщений повторяем без reply
+        if is_update and reply_to_id:
+            logger.warning(
+                "⚠️ Reply на исходное уведомление не удался (lead_id=%s, message_id=%s): %s. "
+                "Отправляю без reply.",
+                lead.id,
+                reply_to_id,
+                e,
+            )
+            kwargs.pop("reply_to_message_id", None)
+            try:
+                await bot.send_message(**kwargs)
+                logger.info(
+                    "📨 Уведомление об изменении отправлено без reply: lead_id=%s",
+                    lead.id,
+                )
+            except Exception as retry_error:
+                logger.error(
+                    "❌ Ошибка отправки уведомления об изменении %s: %s",
+                    target,
+                    retry_error,
+                )
+        else:
+            logger.error("❌ Ошибка отправки уведомления %s: %s", target, e)
+
+
+async def finish_completed_field_edit(lead: Lead, message: types.Message, db) -> None:
+    """Сохраняет изменения в завершённой заявке и обновляет экспорт."""
+    clear_field_edit(db, str(message.chat.id), lead)
+    lead.export_status = "pending"
+    db.commit()
+
+    try:
+        saved = await asyncio.to_thread(export_lead_to_sheets, lead)
+        lead.export_status = "exported" if saved else "failed"
+    except Exception as e:
+        lead.export_status = "failed"
+        logger.error("❌ Ошибка повторного экспорта после редактирования: %s", e)
+
+    # Уведомляем менеджера об изменении (reply на исходное уведомление, если есть)
+    await notify_manager(lead, is_update=True)
+    db.commit()
+
+    await send_reply(message, "✅ Данные заявки обновлены.")
+    await send_reply(
+        message,
+        format_client_summary(lead),
+        parse_mode=ParseMode.HTML,
+    )
+    await send_reply(
+        message,
+        POST_COMPLETION_HINT,
+        reply_markup=get_new_application_keyboard(),
+    )
+
+
+async def prompt_field_edit(
+    message: types.Message,
+    db,
+    lead: Lead,
+    field_name: str,
+) -> None:
+    chat_id = str(message.chat.id)
+    start_field_edit(db, chat_id, lead, field_name)
+    field = LeadField(field_name)
+    question = FSMService.get_question_for_field(field)
+    await send_reply(
+        message,
+        f"Введите новое значение для поля «{FIELD_MENU_LABELS[field_name]}»:\n\n{question}",
+        reply_markup=get_reply_markup_for_field(db, chat_id, field),
+    )
+    db.commit()
 
 # === ЗАВЕРШЕНИЕ ЗАЯВКИ ===
 async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) -> None:
@@ -938,28 +1145,12 @@ async def finalize_lead(lead: Lead, message: types.Message, db, dialog: list) ->
 
     await send_reply(
         message,
-        "Хотите оставить ещё одну заявку? Нажмите кнопку ниже или отправьте /new",
+        POST_COMPLETION_HINT,
         reply_markup=get_new_application_keyboard(),
     )
 
-    # Уведомление в группу или менеджеру
-    notification_chat_id = config.GROUP_CHAT_ID or config.MANAGER_CHAT_ID
-    if notification_chat_id:
-        try:
-            await bot.send_message(
-                chat_id=int(notification_chat_id),
-                text=format_manager_notification(lead),
-                parse_mode=ParseMode.HTML,
-            )
-            if config.GROUP_CHAT_ID:
-                logger.info("📨 Уведомление отправлено в группу: lead_id=%s", lead.id)
-            else:
-                logger.info("📨 Уведомление отправлено менеджеру: lead_id=%s", lead.id)
-        except Exception as e:
-            if config.GROUP_CHAT_ID:
-                logger.error("❌ Ошибка отправки уведомления в группу: %s", e)
-            else:
-                logger.error("❌ Ошибка отправки уведомления менеджеру: %s", e)
+    # Уведомление менеджеру/в группу (сохраняем message_id для будущих reply)
+    await notify_manager(lead, is_update=False)
 
     # Сохраняем в Google Sheets
     try:
@@ -994,7 +1185,11 @@ async def cmd_start(message: types.Message):
             > 0
         )
         if has_completed:
-            await send_reply(message, COMPLETED_LEAD_HINT)
+            await send_reply(
+                message,
+                COMPLETED_LEAD_HINT,
+                reply_markup=get_new_application_keyboard(),
+            )
             return
 
         active_lead = get_active_lead(db, chat_id)
@@ -1022,6 +1217,72 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await send_reply(message, HELP_TEXT, parse_mode=ParseMode.HTML)
+
+
+FIELD_CHANGE_ALIASES = {
+    "car": "car",
+    "авто": "car",
+    "автомобиль": "car",
+    "budget": "budget",
+    "бюджет": "budget",
+    "timeline": "timeline",
+    "срок": "timeline",
+    "experience": "experience",
+    "рынок": "experience",
+    "contact": "contact",
+    "контакт": "contact",
+}
+
+CHANGE_BUTTON_TO_FIELD = {
+    f"изменить {FIELD_MENU_LABELS[name].lower()}": name
+    for name in FIELD_MENU_LABELS
+}
+
+
+@dp.message(Command("change"))
+async def cmd_change(message: types.Message, command: CommandObject):
+    chat_id = str(message.chat.id)
+    db = Session()
+    try:
+        lead = get_working_lead(db, chat_id) or get_active_lead(db, chat_id)
+        if not lead:
+            lead = get_latest_completed_lead(db, chat_id)
+            if lead:
+                set_edit_mode(db, lead, True)
+            else:
+                await send_reply(message, "Сначала начните заявку командой /start.")
+                return
+
+        field_arg = (command.args or "").strip().lower()
+        if field_arg:
+            field_name = FIELD_CHANGE_ALIASES.get(field_arg)
+            if not field_name:
+                await send_reply(
+                    message,
+                    "Неизвестное поле. Используйте: car, budget, timeline, experience, contact.",
+                )
+                return
+            await prompt_field_edit(message, db, lead, field_name)
+            return
+
+        lead_data = get_lead_data(lead)
+        keyboard = get_change_fields_keyboard(lead_data)
+        if not keyboard:
+            await send_reply(message, "Пока нет заполненных полей для изменения.")
+            return
+
+        await send_reply(
+            message,
+            "Какое поле вы хотите изменить?",
+            reply_markup=keyboard,
+        )
+        db.commit()
+    except Exception as e:
+        logger.error("❌ Ошибка команды /change: %s", e, exc_info=True)
+        await send_reply(message, "⚠️ Не удалось начать изменение. Попробуйте позже.")
+        db.rollback()
+    finally:
+        db.close()
 
 
 @dp.message(Command("cancel"))
@@ -1068,7 +1329,7 @@ async def cmd_new(message: types.Message):
         lead = Lead(chat_id=chat_id, username=username, pending_state={})
         db.add(lead)
         db.flush()
-        await begin_lead_dialog(message, db, lead)
+        await begin_lead_dialog(message, db, lead, include_welcome=False)
     except Exception as e:
         logger.error("❌ Ошибка команды /new: %s", e, exc_info=True)
         await send_reply(message, "⚠️ Не удалось начать новую заявку. Попробуйте позже.")
@@ -1153,9 +1414,66 @@ async def handle_message(message: types.Message):
         return
 
     # === НОВАЯ ЗАЯВКА ЧЕРЕЗ КНОПКУ ===
-    if message.text and message.text.strip() in {"/new", "Оставить новую заявку"}:
+    if message.text and message.text.strip() in {"/new", "Новая заявка", "Оставить новую заявку"}:
         await cmd_new(message)
         return
+
+    # === РЕДАКТИРОВАНИЕ ЗАВЕРШЁННОЙ ЗАЯВКИ ===
+    if message.text:
+        text_action = message.text.strip()
+        if text_action in {"Изменить заявку", "Изменить данные заявки"}:
+            db = Session()
+            try:
+                lead = get_latest_completed_lead(db, chat_id)
+                if not lead:
+                    await send_reply(message, "Сначала завершите заявку.")
+                    return
+                set_edit_mode(db, lead, True)
+                await send_reply(
+                    message,
+                    "Выберите поле, которое хотите изменить:",
+                    reply_markup=get_edit_fields_keyboard(),
+                )
+                db.commit()
+            finally:
+                db.close()
+            return
+
+        if text_action == "Готово":
+            db = Session()
+            try:
+                lead = get_working_lead(db, chat_id)
+                if lead and (lead.pending_state or {}).get(EDIT_MODE_KEY):
+                    set_edit_mode(db, lead, False)
+                    db.commit()
+                    await send_reply(
+                        message,
+                        "Редактирование завершено.",
+                        reply_markup=get_new_application_keyboard(),
+                    )
+                else:
+                    await send_reply(message, "Нет активного режима редактирования.")
+            finally:
+                db.close()
+            return
+
+        field_name = FIELD_MENU_TO_NAME.get(text_action)
+        if not field_name:
+            field_name = CHANGE_BUTTON_TO_FIELD.get(text_action.lower())
+
+        if field_name:
+            db = Session()
+            try:
+                lead = get_working_lead(db, chat_id) or get_latest_completed_lead(db, chat_id)
+                if not lead:
+                    await send_reply(message, "Сначала начните или завершите заявку.")
+                    return
+                if lead.status == "completed":
+                    set_edit_mode(db, lead, True)
+                await prompt_field_edit(message, db, lead, field_name)
+            finally:
+                db.close()
+            return
 
     # === ПОДГОТОВКА ТЕКСТА / КОНТАКТА ===
     shared_contact = message.contact
@@ -1195,19 +1513,18 @@ async def handle_message(message: types.Message):
         cancel_reminder_for_chat(db, chat_id)
         db.commit()
 
-        lead = get_active_lead(db, chat_id)
+        lead = get_working_lead(db, chat_id)
         is_new_lead = False
         just_sent_welcome = False
 
         if not lead:
-            has_completed = (
-                db.query(Lead)
-                .filter(Lead.chat_id == chat_id, Lead.status == "completed")
-                .count()
-                > 0
-            )
-            if has_completed:
-                await send_reply(message, COMPLETED_LEAD_HINT)
+            completed = get_latest_completed_lead(db, chat_id)
+            if completed and not (completed.pending_state or {}).get(EDIT_MODE_KEY):
+                await send_reply(
+                    message,
+                    COMPLETED_LEAD_HINT,
+                    reply_markup=get_new_application_keyboard(),
+                )
                 return
 
             lead = Lead(chat_id=chat_id, username=username, pending_state={})
@@ -1224,7 +1541,7 @@ async def handle_message(message: types.Message):
 
         # 3. ПОЛУЧАЕМ ТЕКУЩИЕ ДАННЫЕ
         lead_data = get_lead_data(lead)
-        expected_field = FSMService.get_next_field(lead_data)
+        expected_field = get_expected_field(db, chat_id, lead)
         log_fsm_state(lead, chat_id, "expected_field", expected_field=expected_field)
 
         # После «позже» — переспрос текущего вопроса при невалидном ответе
@@ -1297,10 +1614,26 @@ async def handle_message(message: types.Message):
             if not expected_field or expected_field != LeadField.CONTACT:
                 await send_current_field_prompt(message, db, chat_id, expected_field)
                 return
-            lead.contact = clean_text(shared_contact.phone_number)
+            phone = clean_text(shared_contact.phone_number)
+            ok, formatted_phone, error = normalize_contact(phone)
+            if not ok:
+                await send_reply(message, error or get_contact_error_message(phone))
+                return
+            lead.contact = formatted_phone
             set_awaiting_manual_contact(db, chat_id, False)
             skip_field_processing = True
             logger.info("📱 Получен номер телефона: %s", lead.contact)
+            if get_lead_pending_state(lead).get(EDITING_FIELD_KEY) == "contact":
+                if lead.status == "completed":
+                    await finish_completed_field_edit(lead, message, db)
+                    return
+                clear_field_edit(db, chat_id, lead)
+                await send_reply(message, "✅ Поле «Контакт» обновлено.")
+                db.commit()
+                expected_field = get_expected_field(db, chat_id, lead)
+                if expected_field:
+                    await send_current_field_prompt(message, db, chat_id, expected_field)
+                return
         elif (
             expected_field
             and expected_field != LeadField.CONTACT
@@ -1321,7 +1654,8 @@ async def handle_message(message: types.Message):
             ):
                 field_name = expected_field.value
                 if field_name == "car":
-                    car_parse_result = await parse_car_hybrid(text, llm)
+                    car_text = strip_greetings_from_car_text(text)
+                    car_parse_result = await parse_car_answer(car_text, llm)
                     is_valid = car_parse_result.get("status") == "ok"
                 else:
                     is_valid = is_answer_valid(text, field_name)
@@ -1330,7 +1664,11 @@ async def handle_message(message: types.Message):
                     keyboard = None if (
                         field_name == "contact" and is_awaiting_manual_contact(db, chat_id)
                     ) else get_keyboard_for_field(field_name)
-                    message_text = get_invalid_answer_message(field_name)
+                    message_text = (
+                        get_contact_error_message(text)
+                        if field_name == "contact"
+                        else get_invalid_answer_message(field_name)
+                    )
                     if keyboard:
                         await send_reply(
                             message,
@@ -1366,6 +1704,24 @@ async def handle_message(message: types.Message):
                     field_answer_applied = apply_expected_field_answer(
                         lead, db, chat_id, expected_field, text
                     )
+
+                if field_answer_applied:
+                    editing_field = get_lead_pending_state(lead).get(EDITING_FIELD_KEY)
+                    if editing_field:
+                        if lead.status == "completed":
+                            await finish_completed_field_edit(lead, message, db)
+                            return
+                        clear_field_edit(db, chat_id, lead)
+                        await send_reply(
+                            message,
+                            f"✅ Поле «{FIELD_MENU_LABELS[expected_field.value]}» обновлено.",
+                        )
+                        db.commit()
+                        expected_field = get_expected_field(db, chat_id, lead)
+                        if expected_field:
+                            await send_current_field_prompt(message, db, chat_id, expected_field)
+                            return
+
                 if field_answer_applied and expected_field.value in BUTTON_FIELDS:
                     skip_field_processing = True
                     db.commit()
@@ -1523,6 +1879,15 @@ async def on_startup():
             url=config.WEBHOOK_URL,
             secret_token=config.WEBHOOK_SECRET_TOKEN or None,
             drop_pending_updates=True,
+        )
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="Начать работу с ботом"),
+                BotCommand(command="new", description="Оставить новую заявку"),
+                BotCommand(command="change", description="Изменить ответ"),
+                BotCommand(command="cancel", description="Отменить диалог"),
+                BotCommand(command="help", description="Справка"),
+            ]
         )
         logger.info("🔗 Webhook установлен: %s", config.WEBHOOK_URL)
     except Exception as e:

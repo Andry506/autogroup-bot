@@ -1,7 +1,7 @@
 import os
 import logging
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
@@ -17,6 +17,13 @@ engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False},
 )
+
+
+@event.listens_for(engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.close()
 
 # Фабрика сессий (для выполнения запросов)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -46,11 +53,25 @@ def ensure_schema() -> None:
         migrations.append("ALTER TABLE leads ADD COLUMN pending_state JSON")
     if "export_status" not in columns:
         migrations.append("ALTER TABLE leads ADD COLUMN export_status VARCHAR(50) DEFAULT ''")
+    if "manager_notification_message_id" not in columns:
+        migrations.append(
+            "ALTER TABLE leads ADD COLUMN manager_notification_message_id INTEGER"
+        )
 
-    if not migrations:
+    indexes = {idx["name"] for idx in inspector.get_indexes("leads")}
+    index_migrations = []
+    if "idx_chat_id_status" not in indexes:
+        index_migrations.append(
+            "CREATE INDEX IF NOT EXISTS idx_chat_id_status ON leads (chat_id, status)"
+        )
+
+    if not migrations and not index_migrations:
         return
 
     with engine.begin() as conn:
         for sql in migrations:
             conn.execute(text(sql))
             logger.info("Применена миграция: %s", sql)
+        for sql in index_migrations:
+            conn.execute(text(sql))
+            logger.info("Применён индекс: %s", sql)

@@ -17,15 +17,12 @@ def format_client_summary(lead: Lead) -> str:
         f"📅 <b>Срок:</b> {escape_html(lead.timeline)}\n"
         f"🌍 <b>Рынок:</b> {escape_html(lead.experience)}\n"
         f"📱 <b>Контакт:</b> {escape_html(lead.contact)}\n\n"
-        "👨‍💼 Менеджер свяжется с вами в ближайшее время!"
+        "👨‍💼 Менеджер свяжется с Вами в ближайшее время!"
     )
 
 
-def format_manager_notification(lead: Lead) -> str:
-    """Форматирует уведомление для менеджера (БЕЗ ЭМОДЗИ)"""
+def _format_manager_lead_fields(lead: Lead) -> str:
     return (
-        "НОВАЯ ЗАЯВКА!\n\n"
-        "Данные клиента:\n"
         f"Авто: {format_car_display(lead.car)}\n"
         f"Бюджет: {lead.budget}\n"
         f"Срок: {lead.timeline}\n"
@@ -33,5 +30,18 @@ def format_manager_notification(lead: Lead) -> str:
         f"Контакт: {lead.contact}\n"
         f"Username: @{lead.username or 'не указан'}\n"
         f"Chat ID: {lead.chat_id}\n\n"
-        "Свяжитесь с клиентом в Telegram по Chat ID."
+        "Свяжитесь с клиентом по Chat ID в Telegram или по номеру телефона, указанному в заявке."
+    )
+
+
+def format_manager_notification(lead: Lead) -> str:
+    """Форматирует уведомление для менеджера о новой заявке."""
+    return f"НОВАЯ ЗАЯВКА!\n\nДанные клиента:\n{_format_manager_lead_fields(lead)}"
+
+
+def format_manager_update_notification(lead: Lead) -> str:
+    """Форматирует уведомление для менеджера об изменении завершённой заявки."""
+    return (
+        "🔄 ЗАЯВКА ИЗМЕНЕНА\n\n"
+        f"Обновлённые данные клиента:\n{_format_manager_lead_fields(lead)}"
     )
