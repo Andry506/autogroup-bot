@@ -736,10 +736,6 @@ def is_contact_like_text(text: str) -> bool:
     if re.search(r"@\w+", text):
         return True
     return is_phone_number_valid(text)
-<<<<<<< HEAD
-=======
-
->>>>>>> 7a2a82d7e40864ea23f680e5745262ec85a29678
 
 
 def log_fsm_state(
@@ -852,10 +848,6 @@ async def apply_parsed_fields(
             continue
         if field == "car":
             car_result = await parse_car_answer(strip_greetings_from_car_text(clean_value), llm)
-<<<<<<< HEAD
-=======
-
->>>>>>> 7a2a82d7e40864ea23f680e5745262ec85a29678
             if car_result.get("status") != "ok":
                 continue
             clean_value = car_to_db(car_result)
