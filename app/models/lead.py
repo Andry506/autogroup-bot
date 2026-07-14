@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 from sqlalchemy import Column, String, DateTime, JSON, Index, Integer
+=======
+from sqlalchemy import Column, String, DateTime, JSON, Index
+>>>>>>> 7a2a82d7e40864ea23f680e5745262ec85a29678
 from app.core.database import Base
 from datetime import datetime
 import uuid

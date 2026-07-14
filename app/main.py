@@ -26,7 +26,13 @@ from app.core.contact_validation import (
     is_valid_contact,
     normalize_contact,
 )
-from app.core.config import config, validate_config
+from app.core.contact_validation import (
+    INVALID_COUNTRY_CODE_MESSAGE,
+    is_phone_number_valid,
+    is_valid_contact,
+    normalize_contact,
+)
+from app.core.contact_validation import is_valid_contact
 from app.core.database import engine, Base, ensure_schema
 from app.core.llm_client import LLMClient, fallback_message, is_empty_parsed
 from app.core.options import BUDGET_OPTIONS, MARKET_OPTIONS, TIMELINE_OPTIONS
@@ -595,6 +601,7 @@ def is_answer_valid(text: str, field_name: str) -> bool:
         return text_stripped in MARKET_OPTIONS
 
     if field_name == "contact":
+
         if re.search(r"@\w+", text_stripped):
             return True
         return is_phone_number_valid(text_stripped)
@@ -729,6 +736,10 @@ def is_contact_like_text(text: str) -> bool:
     if re.search(r"@\w+", text):
         return True
     return is_phone_number_valid(text)
+<<<<<<< HEAD
+=======
+
+>>>>>>> 7a2a82d7e40864ea23f680e5745262ec85a29678
 
 
 def log_fsm_state(
@@ -841,6 +852,10 @@ async def apply_parsed_fields(
             continue
         if field == "car":
             car_result = await parse_car_answer(strip_greetings_from_car_text(clean_value), llm)
+<<<<<<< HEAD
+=======
+
+>>>>>>> 7a2a82d7e40864ea23f680e5745262ec85a29678
             if car_result.get("status") != "ok":
                 continue
             clean_value = car_to_db(car_result)
@@ -1068,7 +1083,6 @@ async def notify_manager(lead: Lead, *, is_update: bool = False) -> None:
                 )
         else:
             logger.error("❌ Ошибка отправки уведомления %s: %s", target, e)
-
 
 async def finish_completed_field_edit(lead: Lead, message: types.Message, db) -> None:
     """Сохраняет изменения в завершённой заявке и обновляет экспорт."""

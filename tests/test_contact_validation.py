@@ -45,6 +45,5 @@ class ContactValidationTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(error, INVALID_COUNTRY_CODE_MESSAGE)
 
-
 if __name__ == "__main__":
     unittest.main()
