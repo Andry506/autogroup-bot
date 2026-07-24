@@ -4,6 +4,9 @@ import unittest
 
 from app.core.contact_validation import (
     count_phone_digits,
+    format_manager_contact,
+    format_manager_username,
+    format_phone_compact,
     format_phone_number,
     is_phone_number_valid,
     is_valid_contact,
@@ -33,6 +36,25 @@ class ContactValidationTests(unittest.TestCase):
 
     def test_format_belarus_phone(self):
         self.assertEqual(format_phone_number("+375291015287"), "+375 (29) 101-52-87")
+
+    def test_format_phone_compact(self):
+        self.assertEqual(format_phone_compact("+375291015287"), "+375291015287")
+        self.assertEqual(format_phone_compact("+375 (29) 101-52-87"), "+375291015287")
+        self.assertEqual(format_phone_compact("+375 (26) 454-31-32"), "+375264543132")
+        self.assertEqual(format_phone_compact("+79161234567"), "+79161234567")
+        self.assertEqual(format_phone_compact("@client_user"), "@client_user")
+
+    def test_format_manager_contact(self):
+        self.assertEqual(format_manager_contact("+375 (29) 101-52-87"), "+375291015287")
+        self.assertEqual(format_manager_contact("@client_user"), "@client_user")
+        self.assertEqual(format_manager_contact(""), "Не указано")
+
+    def test_format_manager_username(self):
+        self.assertEqual(format_manager_username("client_user"), "@client_user")
+        self.assertEqual(format_manager_username("@client_user"), "@client_user")
+        self.assertEqual(format_manager_username("unknown"), "Не указано")
+        self.assertEqual(format_manager_username(""), "Не указано")
+        self.assertEqual(format_manager_username(None), "Не указано")
 
     def test_normalize_contact(self):
         ok, formatted, error = normalize_contact("+375291015287")

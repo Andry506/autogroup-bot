@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, JSON, Index, Integer
+from sqlalchemy import Boolean, Column, String, DateTime, JSON, Index, Integer
 from app.core.database import Base
 from datetime import datetime
 import uuid
@@ -32,6 +32,10 @@ class Lead(Base):
     dialog_history = Column(JSON, default=list)  # История всего диалога
     # message_id исходного уведомления менеджеру (для reply при изменениях)
     manager_notification_message_id = Column(Integer, nullable=True)
+
+    # Согласие на обработку персональных данных
+    consent_given = Column(Boolean, default=False, nullable=False)
+    consent_given_at = Column(DateTime, nullable=True)
     
     # Даты
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -93,6 +93,46 @@ def format_phone_number(text: str) -> str:
     return f"{country_code} {formatted_national}".strip()
 
 
+def format_phone_compact(text: str) -> str:
+    """Возвращает номер в компактном международном формате: +375291015272."""
+    stripped = text.strip()
+    if is_username_contact(stripped):
+        return stripped
+
+    digits = _digits_only(stripped)
+    if not digits:
+        return stripped
+
+    if stripped.startswith("+"):
+        country_code, national = _match_country_code(digits)
+    else:
+        country_code, national = _infer_country_code(digits)
+
+    if not country_code:
+        return f"+{digits}" if not stripped.startswith("+") else stripped
+
+    national = national.lstrip("0")
+    return f"{country_code}{national}"
+
+
+def format_manager_contact(contact: str) -> str:
+    """Форматирует контакт для уведомления менеджеру (кликабельный телефон)."""
+    stripped = (contact or "").strip()
+    if not stripped:
+        return "Не указано"
+    if is_username_contact(stripped):
+        return stripped
+    return format_phone_compact(stripped)
+
+
+def format_manager_username(username: str | None) -> str:
+    """Форматирует Telegram username для уведомления менеджеру."""
+    value = (username or "").strip().lstrip("@")
+    if not value or value.lower() == "unknown":
+        return "Не указано"
+    return f"@{value}"
+
+
 def validate_phone_number(text: str) -> tuple[bool, str]:
     stripped = text.strip()
     if not re.fullmatch(r"[\d\s\(\)\-\+]+", stripped):

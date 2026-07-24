@@ -8,7 +8,15 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import (
+    BotCommand,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import sessionmaker
 from app.core.config import config, validate_config
@@ -102,6 +110,39 @@ REMINDER_STARTED_AT_KEY = "reminder_started_at"
 AWAITING_MANUAL_CONTACT_KEY = "awaiting_manual_contact"
 EDIT_MODE_KEY = "edit_mode"
 EDITING_FIELD_KEY = "editing_field"
+AWAITING_CONSENT_KEY = "awaiting_consent"
+CONSENT_DECLINED_KEY = "consent_declined"
+
+ACCEPT_CONSENT_CALLBACK = "accept_consent"
+DECLINE_CONSENT_CALLBACK = "decline_consent"
+
+CONSENT_PROMPT_TEXT = (
+    "Здравствуйте! Я AI-помощник компании AutoGroup!\n"
+    "Я помогу собрать заявку на автомобиль \"мечты\"!\n"
+    "Пожалуйста, отвечайте на вопросы, и я передам данные менеджеру.\n\n"
+    "Для начала работы необходимо принять условия обработки персональных данных.\n"
+    "Полный текст соглашения доступен по ссылке: "
+    "https://telegra.ph/SOGLASIE-NA-OBRABOTKU-PERSONALNYH-DANNYH-PRI-ISPOLZOVANII-CHAT-BOTA-07-24\n\n"
+    "Нажимая кнопку «Согласен(а)», вы подтверждаете, что ознакомлены и согласны с условиями.\n"
+    "Если вы не согласны — нажмите «Не согласен». "
+    "Без вашего согласия мы не сможем продолжить работу."
+)
+
+CONSENT_REQUIRED_MESSAGE = (
+    "Для начала работы, пожалуйста, примите условия обработки персональных данных, "
+    "нажав кнопку «Согласен(а)» в сообщении выше."
+)
+
+CONSENT_DECLINED_MESSAGE = (
+    "К сожалению, без вашего согласия на обработку персональных данных "
+    "мы не можем продолжить работу. Если передумаете — просто нажмите /start, "
+    "и мы начнём заново."
+)
+
+CONSENT_ACCEPTED_MESSAGE = (
+    "Спасибо! Теперь мы можем продолжить.\n"
+    "🚗 Какой автомобиль Вас интересует? (Марка, модель, год)"
+)
 
 
 CHANGE_KEYWORDS = [
@@ -212,6 +253,85 @@ def get_working_lead(db, chat_id: str) -> Lead | None:
     if completed and (completed.pending_state or {}).get(EDIT_MODE_KEY):
         return completed
     return None
+
+
+def user_has_consent(db, chat_id: str) -> bool:
+    """Проверяет, давал ли пользователь согласие на обработку ПДн (по chat_id)."""
+    return (
+        db.query(Lead)
+        .filter(Lead.chat_id == chat_id, Lead.consent_given.is_(True))
+        .count()
+        > 0
+    )
+
+
+def is_awaiting_consent(lead: Lead | None) -> bool:
+    if not lead:
+        return False
+    state = get_lead_pending_state(lead)
+    return bool(state.get(AWAITING_CONSENT_KEY) or state.get(CONSENT_DECLINED_KEY))
+
+
+def set_consent_pending_flags(
+    lead: Lead,
+    *,
+    awaiting: bool = False,
+    declined: bool = False,
+) -> None:
+    state = get_lead_pending_state(lead)
+    if awaiting:
+        state[AWAITING_CONSENT_KEY] = True
+    else:
+        state.pop(AWAITING_CONSENT_KEY, None)
+    if declined:
+        state[CONSENT_DECLINED_KEY] = True
+    else:
+        state.pop(CONSENT_DECLINED_KEY, None)
+    lead.pending_state = state
+
+
+def mark_consent_accepted(lead: Lead) -> None:
+    lead.consent_given = True
+    lead.consent_given_at = datetime.now(timezone.utc)
+    set_consent_pending_flags(lead, awaiting=False, declined=False)
+
+
+def get_consent_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Согласен(а)",
+                    callback_data=ACCEPT_CONSENT_CALLBACK,
+                ),
+                InlineKeyboardButton(
+                    text="❌ Не согласен",
+                    callback_data=DECLINE_CONSENT_CALLBACK,
+                ),
+            ]
+        ]
+    )
+
+
+async def send_consent_prompt(message: types.Message, db, lead: Lead) -> None:
+    """Отправляет текст согласия с инлайн-кнопками и сохраняет awaiting_consent."""
+    set_consent_pending_flags(lead, awaiting=True, declined=False)
+    dialog = list(lead.dialog_history or [])
+    dialog.append(
+        {
+            "role": "assistant",
+            "text": CONSENT_PROMPT_TEXT,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    lead.dialog_history = trim_dialog_history(dialog)
+    db.commit()
+    await send_reply(
+        message,
+        CONSENT_PROMPT_TEXT,
+        reply_markup=get_consent_keyboard(),
+        disable_web_page_preview=True,
+    )
 
 
 def get_lead_pending_state(lead: Lead | None) -> dict:
@@ -1185,6 +1305,29 @@ async def cmd_start(message: types.Message):
     username = message.from_user.username or "unknown"
     db = Session()
     try:
+        has_consent = user_has_consent(db, chat_id)
+
+        if not has_consent:
+            active_lead = get_active_lead(db, chat_id)
+            if active_lead and is_awaiting_consent(active_lead):
+                lead = active_lead
+            elif active_lead and not active_lead.consent_given:
+                lead = active_lead
+            else:
+                cancel_reminder_for_chat(db, chat_id)
+                lead = Lead(chat_id=chat_id, username=username, pending_state={})
+                db.add(lead)
+                db.flush()
+            if username != "unknown":
+                lead.username = username
+            await send_consent_prompt(message, db, lead)
+            logger.info(
+                "👋 /start: запрос согласия lead_id=%s chat_id=%s",
+                lead.id,
+                chat_id,
+            )
+            return
+
         has_completed = (
             db.query(Lead)
             .filter(Lead.chat_id == chat_id, Lead.status == "completed")
@@ -1201,6 +1344,10 @@ async def cmd_start(message: types.Message):
 
         active_lead = get_active_lead(db, chat_id)
         if active_lead:
+            if not active_lead.consent_given:
+                # Переносим факт согласия с другого лида того же chat_id
+                mark_consent_accepted(active_lead)
+                db.commit()
             await send_reply(
                 message,
                 "У вас уже есть активная заявка. Продолжайте диалог или отправьте /cancel.",
@@ -1208,7 +1355,13 @@ async def cmd_start(message: types.Message):
             return
 
         cancel_reminder_for_chat(db, chat_id)
-        lead = Lead(chat_id=chat_id, username=username, pending_state={})
+        lead = Lead(
+            chat_id=chat_id,
+            username=username,
+            pending_state={},
+            consent_given=True,
+            consent_given_at=datetime.now(timezone.utc),
+        )
         db.add(lead)
         db.flush()
         await begin_lead_dialog(message, db, lead)
@@ -1221,9 +1374,95 @@ async def cmd_start(message: types.Message):
         db.close()
 
 
+@dp.callback_query(lambda c: c.data in {ACCEPT_CONSENT_CALLBACK, DECLINE_CONSENT_CALLBACK})
+async def handle_consent_callback(callback: CallbackQuery):
+    chat_id = str(callback.message.chat.id) if callback.message else str(callback.from_user.id)
+    db = Session()
+    try:
+        lead = get_active_lead(db, chat_id)
+        if not lead:
+            await callback.answer("Сначала нажмите /start", show_alert=True)
+            return
+
+        if lead.consent_given:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await callback.answer("Согласие уже принято")
+            return
+
+        if callback.data == ACCEPT_CONSENT_CALLBACK:
+            mark_consent_accepted(lead)
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await callback.answer()
+
+            car_question = FSMService.get_question_for_field(LeadField.CAR)
+            display_text = CONSENT_ACCEPTED_MESSAGE
+            await bot.send_message(chat_id=int(chat_id), text=display_text)
+            await schedule_question_reminder(db, chat_id, car_question)
+
+            dialog = list(lead.dialog_history or [])
+            dialog.append(
+                {
+                    "role": "assistant",
+                    "text": display_text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            lead.dialog_history = trim_dialog_history(dialog)
+            db.commit()
+            logger.info("✅ Согласие принято: lead_id=%s chat_id=%s", lead.id, chat_id)
+            return
+
+        # decline_consent
+        set_consent_pending_flags(lead, awaiting=False, declined=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await callback.answer()
+        await bot.send_message(chat_id=int(chat_id), text=CONSENT_DECLINED_MESSAGE)
+        dialog = list(lead.dialog_history or [])
+        dialog.append(
+            {
+                "role": "assistant",
+                "text": CONSENT_DECLINED_MESSAGE,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        lead.dialog_history = trim_dialog_history(dialog)
+        db.commit()
+        logger.info("❌ Согласие отклонено: lead_id=%s chat_id=%s", lead.id, chat_id)
+    except Exception as e:
+        logger.error("❌ Ошибка обработки согласия: %s", e, exc_info=True)
+        await callback.answer("Произошла ошибка. Попробуйте /start", show_alert=True)
+        db.rollback()
+    finally:
+        db.close()
+
+
+async def ensure_consent_or_reply(message: types.Message, db, chat_id: str) -> bool:
+    """Возвращает True, если согласие есть. Иначе отвечает и возвращает False."""
+    if user_has_consent(db, chat_id):
+        return True
+    await send_reply(message, CONSENT_REQUIRED_MESSAGE)
+    return False
+
+
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    await send_reply(message, HELP_TEXT, parse_mode=ParseMode.HTML)
+    chat_id = str(message.chat.id)
+    db = Session()
+    try:
+        if not await ensure_consent_or_reply(message, db, chat_id):
+            return
+        await send_reply(message, HELP_TEXT, parse_mode=ParseMode.HTML)
+    finally:
+        db.close()
 
 
 FIELD_CHANGE_ALIASES = {
@@ -1251,6 +1490,9 @@ async def cmd_change(message: types.Message, command: CommandObject):
     chat_id = str(message.chat.id)
     db = Session()
     try:
+        if not await ensure_consent_or_reply(message, db, chat_id):
+            return
+
         lead = get_working_lead(db, chat_id) or get_active_lead(db, chat_id)
         if not lead:
             lead = get_latest_completed_lead(db, chat_id)
@@ -1324,6 +1566,9 @@ async def cmd_new(message: types.Message):
     username = message.from_user.username or "unknown"
     db = Session()
     try:
+        if not await ensure_consent_or_reply(message, db, chat_id):
+            return
+
         active_lead = get_active_lead(db, chat_id)
         if active_lead:
             await send_reply(
@@ -1333,7 +1578,13 @@ async def cmd_new(message: types.Message):
             return
 
         cancel_reminder_for_chat(db, chat_id)
-        lead = Lead(chat_id=chat_id, username=username, pending_state={})
+        lead = Lead(
+            chat_id=chat_id,
+            username=username,
+            pending_state={},
+            consent_given=True,
+            consent_given_at=datetime.now(timezone.utc),
+        )
         db.add(lead)
         db.flush()
         await begin_lead_dialog(message, db, lead, include_welcome=False)
@@ -1394,6 +1645,15 @@ async def handle_message(message: types.Message):
             "⚠️ Слишком много сообщений. Подождите минуту и попробуйте снова.",
         )
         return
+
+    # === СОГЛАСИЕ НА ОБРАБОТКУ ПДн ===
+    consent_db = Session()
+    try:
+        if not user_has_consent(consent_db, chat_id):
+            await send_reply(message, CONSENT_REQUIRED_MESSAGE)
+            return
+    finally:
+        consent_db.close()
 
     # === ОТЛОЖИТЬ ОТВЕТ («позже», «потом» и т.д.) ===
     if message.text and is_later_response(message.text.strip()):
@@ -1534,7 +1794,13 @@ async def handle_message(message: types.Message):
                 )
                 return
 
-            lead = Lead(chat_id=chat_id, username=username, pending_state={})
+            lead = Lead(
+                chat_id=chat_id,
+                username=username,
+                pending_state={},
+                consent_given=True,
+                consent_given_at=datetime.now(timezone.utc),
+            )
             db.add(lead)
             db.flush()
             is_new_lead = True
