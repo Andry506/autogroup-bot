@@ -1,6 +1,7 @@
 import html
 
 from app.core.car_validation import format_car_display
+from app.core.contact_validation import format_manager_contact, format_manager_username
 from app.models.lead import Lead
 
 
@@ -27,8 +28,8 @@ def _format_manager_lead_fields(lead: Lead) -> str:
         f"Бюджет: {lead.budget}\n"
         f"Срок: {lead.timeline}\n"
         f"Рынок: {lead.experience}\n"
-        f"Контакт: {lead.contact}\n"
-        f"Username: @{lead.username or 'не указан'}\n"
+        f"Контакт: {format_manager_contact(lead.contact)}\n"
+        f"Username: {format_manager_username(lead.username)}\n"
         f"Chat ID: {lead.chat_id}\n\n"
         "Свяжитесь с клиентом по Chat ID в Telegram или по номеру телефона, указанному в заявке."
     )

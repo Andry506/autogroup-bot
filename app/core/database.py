@@ -57,6 +57,14 @@ def ensure_schema() -> None:
         migrations.append(
             "ALTER TABLE leads ADD COLUMN manager_notification_message_id INTEGER"
         )
+    if "consent_given" not in columns:
+        migrations.append(
+            "ALTER TABLE leads ADD COLUMN consent_given BOOLEAN DEFAULT 0 NOT NULL"
+        )
+    if "consent_given_at" not in columns:
+        migrations.append(
+            "ALTER TABLE leads ADD COLUMN consent_given_at DATETIME"
+        )
 
     indexes = {idx["name"] for idx in inspector.get_indexes("leads")}
     index_migrations = []
